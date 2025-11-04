@@ -1,15 +1,32 @@
 // offboard_fsm_node.hpp
-#pragma once
+// Header file for PX4 offboard control FSM
+// Author: Yichao Gao
 
-#include <string>
+#ifndef OFFBOARD_FSM_NODE_HPP_
+#define OFFBOARD_FSM_NODE_HPP_
+
 #include <rclcpp/rclcpp.hpp>
-#include <px4_msgs/msg/offboard_control_mode.hpp>
-#include <px4_msgs/msg/vehicle_command.hpp>
-#include <px4_msgs/msg/vehicle_status.hpp>
-#include <px4_msgs/msg/trajectory_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <std_msgs/msg/int32.hpp>
+
+// Include full headers instead of forward declarations
+#include <px4_msgs/msg/vehicle_status.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/offboard_control_mode.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_command.hpp>
+
+// FSM states
+enum class FsmState {
+  INIT = 0,      // Initialize offboard stream
+  ARMING = 1,    // Switch to offboard & arm
+  TAKEOFF = 2,   // Take off to target altitude
+  GOTO = 3,      // Go to specified position
+  HOVER = 4,     // Hover at current position
+  TRAJ = 5,      // Follow trajectory
+  END_TRAJ = 6,  // End trajectory mode
+  LAND = 7,      // Landing
+  DONE = 8       // Landed & disarmed
+};
 
 class OffboardFSM : public rclcpp::Node
 {
@@ -17,103 +34,99 @@ public:
   explicit OffboardFSM(int drone_id);
 
 private:
-  // FSM states (added LAND before DONE)
-  enum class FsmState { INIT = 0, ARMING, TAKEOFF,GOTO, HOVER, TRAJ, END_TRAJ, LAND, DONE };
-
-  // callbacks
+  // Callbacks
+  void timer_cb();
   void status_cb(const px4_msgs::msg::VehicleStatus::SharedPtr msg);
   void odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg);
   void state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg);
-  void timer_cb();
 
-  // helpers
+  // Helper functions
   void publish_offboard_mode();
+  void publish_current_setpoint();
   void send_vehicle_cmd(uint16_t cmd, float p1, float p2);
   void try_set_offboard_and_arm();
   void generate_trajectory();
   bool has_goto_target() const;
-  // static float wrap_pi(float x);
-  struct Poly5 { double a[6]; };
-  Poly5 poly_[3];            // 0:x, 1:y, 2:z
-  rclcpp::Time traj_start_;
-  double traj_T_ = 0.0;
+  uint64_t get_timestamp_us();
+  // Publishers
+  rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr pub_offb_mode_;
+  rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr pub_traj_sp_;
+  rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr pub_cmd_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr pub_state_;
 
-  static inline double eval_poly(const Poly5 &p, double t)
-  {
-    return ((p.a[5]*t + p.a[4])*t + p.a[3])*t*t*t + p.a[0];
-  }
-  static inline double eval_d1(const Poly5 &p, double t)
-  {
-    return (5*p.a[5]*t + 4*p.a[4])*t*t*t + 3*p.a[3]*t*t;
-  }
-  static inline double eval_d2(const Poly5 &p, double t)
-  {
-    return (20*p.a[5]*t + 12*p.a[4])*t*t + 6*p.a[3]*t;
-  }
+  // Subscribers
+  rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr sub_status_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr sub_odom_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_state_cmd_;
 
-  // parameters
-  int    drone_id_;
+  // Timer
+  rclcpp::TimerBase::SharedPtr timer_;
+
+  // Parameters
+  int drone_id_;
   double takeoff_alt_;
   double takeoff_time_s_;
-  double climb_rate_;                 
-  double landing_time_s_;               
-  double takeoff_pos_x_;
-  double takeoff_pos_y_;
+  double climb_rate_;
+  double landing_time_s_;
+  double circle_radius_;
+  double inward_offset_;
+  int num_drones_;
   double timer_period_s_;
   double alt_tol_;
-  std::string trajectory_type_;
-  // for circle trajectory
   double radius_;
   double period_s_;
+  
+  // GOTO parameters
+  double goto_x_;
+  double goto_y_;
+  double goto_z_;
+  double goto_tol_;
+  
+  // Payload offset
+  double payload_offset_x_;
+  double payload_offset_y_;
 
-  // state variables
+  // State variables
   FsmState current_state_;
-  int      offb_counter_;
-  int      nav_state_;
-  int      arming_state_;
-  bool     ext_state_cmd_;
-  bool     use_attitude_control_ = false;
-  bool     odom_ready_ = false;         // new
-  double   current_x_;                  // new
-  double   current_y_;                  // new
-  double   current_z_;
-  double   last_z_;
-  int      takeoff_start_count_;
-  int      takeoff_complete_count_;
-  double   circle_radius_;     
-  double   inward_offset_;     
-  int      num_drones_; 
-  double   landing_start_z_;            
-  double   landing_x_, landing_y_;      
-  int      landing_start_count_;        
-  double   hover_x_ = 0.0;
-  double   hover_y_ = 0.0;
-  double   hover_z_ = 0.0;  // NED down
-  // double   goto_x_{std::nanf("")}, goto_y_{std::nanf("")}, goto_z_{std::nanf("")};
-  // offboard_fsm_node.hpp  (add after the other member variables)
-  double goto_x_{std::numeric_limits<double>::quiet_NaN()};
-  double goto_y_{std::numeric_limits<double>::quiet_NaN()};
-  double goto_z_{std::numeric_limits<double>::quiet_NaN()};
-  double   goto_tol_{0.03};
-  // payload offset
-  double payload_offset_x_{std::numeric_limits<double>::quiet_NaN()};
-  double payload_offset_y_{std::numeric_limits<double>::quiet_NaN()};
-  std::string px4_ns_;
-
-  // publishers
-  rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr pub_offb_mode_;
-  rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr       pub_cmd_;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr               pub_state_;
-  rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr  pub_traj_sp_;
-  rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr pub_att_sp_;
-
-  // subscriptions
-  rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr    sub_status_;
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr            sub_state_cmd_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr  sub_odom_;
-
-  // timers
-  rclcpp::TimerBase::SharedPtr timer_;
-  rclcpp::TimerBase::SharedPtr selfdefine_traj_timer_;
+  int offb_counter_;
+  int takeoff_start_count_;
+  int takeoff_complete_count_;
+  int landing_start_count_;
+  
+  // Command tracking
+  int offboard_cmd_count_;
+  int arm_cmd_count_;
+  int64_t last_cmd_time_;
+  
+  // Position tracking
+  double takeoff_pos_x_;
+  double takeoff_pos_y_;
+  double hover_x_;
+  double hover_y_;
+  double hover_z_;
+  double landing_x_;
+  double landing_y_;
+  double landing_start_z_;
+  
+  // Current position from odometry
+  double current_x_;
+  double current_y_;
+  double current_z_;
+  double last_z_;
+  bool odom_ready_;
+  
+  // Control mode
+  bool use_attitude_control_;
+  
+  // PX4 status
+  uint8_t nav_state_;
+  uint8_t arming_state_;
+  
+  // Time tracking
   rclcpp::Time state_start_time_;
+  std::chrono::steady_clock::time_point start_time_;
+  // Namespace
+  std::string px4_ns_;
 };
+
+#endif  // OFFBOARD_FSM_NODE_HPP_

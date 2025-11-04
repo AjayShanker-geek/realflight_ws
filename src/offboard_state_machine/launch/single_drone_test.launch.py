@@ -34,9 +34,9 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             "drone_id": drone_id,
             "takeoff_alt": takeoff_altitude,
-            "takeoff_time": 5.0,        # seconds to reach takeoff altitude
+            "takeoff_time": 1.0,        # seconds to reach takeoff altitude
             "climb_rate": 1.0,          # m/s (will be overridden by takeoff_alt/takeoff_time)
-            "landing_time": 5.0,        # seconds for landing
+            "landing_time": 2.0,        # seconds for landing
             "goto_x": goto_x,
             "goto_y": goto_y,
             "goto_z": goto_z,
@@ -45,7 +45,7 @@ def generate_launch_description() -> LaunchDescription:
             "alt_tol": 0.03,            # altitude tolerance in meters
             "inward_offset": 0.0,       # no offset for single drone at origin
             "payload_offset_x": 0.0,    # no payload offset
-            "payload_offset_y": -1.50   # match goto_y for hover
+            "payload_offset_y": 0.00   # match goto_y for hover
         }],
     )
 
