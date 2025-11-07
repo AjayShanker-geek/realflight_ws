@@ -9,6 +9,10 @@ ViconPX4Bridge::ViconPX4Bridge() : Node("vicon_px4_bridge")
     this->declare_parameter<std::string>("input_frame", "ENU");
     this->declare_parameter<std::string>("output_frame", "NED");
     
+    // Declare separate transformation parameters for position and orientation
+    this->declare_parameter<std::string>("position_transform_frame", "");
+    this->declare_parameter<std::string>("orientation_transform_frame", "");
+    
     // Get parameters
     vicon_topic_name_ = this->get_parameter("vicon_topic_name").as_string();
     px4_topic_name_ = this->get_parameter("px4_topic_name").as_string();
@@ -16,12 +20,26 @@ ViconPX4Bridge::ViconPX4Bridge() : Node("vicon_px4_bridge")
     input_frame_ = this->get_parameter("input_frame").as_string();
     output_frame_ = this->get_parameter("output_frame").as_string();
     
+    std::string position_transform_frame = this->get_parameter("position_transform_frame").as_string();
+    std::string orientation_transform_frame = this->get_parameter("orientation_transform_frame").as_string();
+    
+    // Use output_frame as default if not specified
+    if (position_transform_frame.empty()) {
+        position_transform_frame = output_frame_;
+    }
+    if (orientation_transform_frame.empty()) {
+        orientation_transform_frame = output_frame_;
+    }
+    
     RCLCPP_INFO(this->get_logger(), "=== Vicon PX4 Bridge Configuration ===");
     RCLCPP_INFO(this->get_logger(), "Vicon topic: %s", vicon_topic_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "PX4 topic: %s", px4_topic_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "Topic type: %s", vicon_topic_type_.c_str());
-    RCLCPP_INFO(this->get_logger(), "Frame conversion: %s -> %s", 
-                input_frame_.c_str(), output_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Input frame: %s", input_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Position transformation: %s -> %s", 
+                input_frame_.c_str(), position_transform_frame.c_str());
+    RCLCPP_INFO(this->get_logger(), "Orientation transformation: %s -> %s", 
+                input_frame_.c_str(), orientation_transform_frame.c_str());
     
     // Validate frame types
     if (input_frame_ != "ENU" && input_frame_ != "FLU" && input_frame_ != "NED") {
@@ -36,17 +54,27 @@ ViconPX4Bridge::ViconPX4Bridge() : Node("vicon_px4_bridge")
         throw std::runtime_error("Invalid output frame");
     }
     
-    // Calculate transformation matrix and quaternion
-    R_transform_ = getTransformationMatrix(input_frame_, output_frame_);
-    q_transform_ = getFrameRotation(input_frame_, output_frame_);
+    // Calculate separate transformation matrices for position and orientation
+    R_position_transform_ = getTransformationMatrix(input_frame_, position_transform_frame);
+    R_orientation_transform_ = getTransformationMatrix(input_frame_, orientation_transform_frame);
     
-    RCLCPP_INFO(this->get_logger(), "Transformation matrix:");
+    q_orientation_transform_ = getFrameRotation(input_frame_, orientation_transform_frame);
+    
+    RCLCPP_INFO(this->get_logger(), "Position transformation matrix:");
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(0,0), R_transform_(0,1), R_transform_(0,2));
+                R_position_transform_(0,0), R_position_transform_(0,1), R_position_transform_(0,2));
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(1,0), R_transform_(1,1), R_transform_(1,2));
+                R_position_transform_(1,0), R_position_transform_(1,1), R_position_transform_(1,2));
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(2,0), R_transform_(2,1), R_transform_(2,2));
+                R_position_transform_(2,0), R_position_transform_(2,1), R_position_transform_(2,2));
+    
+    RCLCPP_INFO(this->get_logger(), "Orientation transformation matrix:");
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_orientation_transform_(0,0), R_orientation_transform_(0,1), R_orientation_transform_(0,2));
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_orientation_transform_(1,0), R_orientation_transform_(1,1), R_orientation_transform_(1,2));
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_orientation_transform_(2,0), R_orientation_transform_(2,1), R_orientation_transform_(2,2));
     
     // Create publisher
     px4_odom_pub_ = this->create_publisher<px4_msgs::msg::VehicleOdometry>(
@@ -173,21 +201,19 @@ void ViconPX4Bridge::viconTransformCallback(
 void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Pose& pose_in,
                                    geometry_msgs::msg::Pose& pose_out)
 {
-    // Convert position using transformation matrix
+    // Transform position using position transformation matrix
     Eigen::Vector3d pos_in(pose_in.position.x, pose_in.position.y, pose_in.position.z);
-    Eigen::Vector3d pos_out = R_transform_ * pos_in;
+    Eigen::Vector3d pos_out = R_position_transform_ * pos_in;
     
     pose_out.position.x = pos_out.x();
     pose_out.position.y = pos_out.y();
     pose_out.position.z = pos_out.z();
     
-    // Convert orientation quaternion
+    // Transform orientation using orientation transformation quaternion
     Eigen::Quaterniond q_in(pose_in.orientation.w, pose_in.orientation.x,
                            pose_in.orientation.y, pose_in.orientation.z);
     
-    // Apply frame rotation: q_out = q_frame_rotation * q_in * q_frame_rotation^-1
-    // But for our coordinate frame changes, we use: q_out = q_frame_rotation * q_in
-    Eigen::Quaterniond q_out = q_transform_ * q_in;
+    Eigen::Quaterniond q_out = q_orientation_transform_ * q_in;
     q_out.normalize();
     
     pose_out.orientation.w = q_out.w();
@@ -199,21 +225,21 @@ void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Pose& pose_in,
 void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Transform& transform_in,
                                    geometry_msgs::msg::Transform& transform_out)
 {
-    // Convert translation
+    // Transform translation using position transformation matrix
     Eigen::Vector3d trans_in(transform_in.translation.x, 
                             transform_in.translation.y, 
                             transform_in.translation.z);
-    Eigen::Vector3d trans_out = R_transform_ * trans_in;
+    Eigen::Vector3d trans_out = R_position_transform_ * trans_in;
     
     transform_out.translation.x = trans_out.x();
     transform_out.translation.y = trans_out.y();
     transform_out.translation.z = trans_out.z();
     
-    // Convert rotation
+    // Transform rotation using orientation transformation quaternion
     Eigen::Quaterniond q_in(transform_in.rotation.w, transform_in.rotation.x,
                            transform_in.rotation.y, transform_in.rotation.z);
     
-    Eigen::Quaterniond q_out = q_transform_ * q_in;
+    Eigen::Quaterniond q_out = q_orientation_transform_ * q_in;
     q_out.normalize();
     
     transform_out.rotation.w = q_out.w();
