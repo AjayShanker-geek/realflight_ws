@@ -4,71 +4,108 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
-
 def generate_launch_description():
-    # Get package directory
-    pkg_share = FindPackageShare('vicon_px4_bridge')
+    """
+    Launch file for Vicon PX4 Bridge with configurable frame transformations.
     
-    # Default parameters file path
-    default_params_file = PathJoinSubstitution([
-        pkg_share,
-        'config',
-        'vicon_px4_params.yaml'
-    ])
+    This launch file demonstrates how to use the corrected bridge with
+    proper world and body frame transformations.
+    """
     
     # Declare launch arguments
-    params_file_arg = DeclareLaunchArgument(
-        'params_file',
-        default_value=default_params_file,
-        description='Path to the parameters file'
+    config_file_arg = DeclareLaunchArgument(
+        'config_file',
+        default_value=PathJoinSubstitution([
+            FindPackageShare('vicon_px4_bridge'),
+            'config',
+            'vicon_px4_bridge_params.yaml'
+        ]),
+        description='Path to the configuration YAML file'
     )
     
+    # You can also override individual parameters here
     vicon_topic_arg = DeclareLaunchArgument(
         'vicon_topic',
-        default_value='',
-        description='Vicon topic name (overrides config file if set)'
+        default_value='/vicon/drone/pose',
+        description='Vicon topic name'
     )
     
-    px4_topic_arg = DeclareLaunchArgument(
-        'px4_topic',
-        default_value='',
-        description='PX4 topic name (overrides config file if set)'
+    input_world_frame_arg = DeclareLaunchArgument(
+        'input_world_frame',
+        default_value='ENU',
+        description='Input world coordinate frame (ENU, NED, etc.)'
     )
     
-    input_frame_arg = DeclareLaunchArgument(
-        'input_frame',
-        default_value='',
-        description='Input frame: ENU, FLU, or NED (overrides config file if set)'
+    output_world_frame_arg = DeclareLaunchArgument(
+        'output_world_frame',
+        default_value='NED',
+        description='Output world coordinate frame (ENU, NED, etc.)'
     )
     
-    output_frame_arg = DeclareLaunchArgument(
-        'output_frame',
-        default_value='',
-        description='Output frame: NED, ENU, or FLU (overrides config file if set)'
+    input_body_frame_arg = DeclareLaunchArgument(
+        'input_body_frame',
+        default_value='FLU',
+        description='Input body coordinate frame (FLU, FRD, etc.)'
     )
     
-    # Build parameters dictionary conditionally
-    parameters = [LaunchConfiguration('params_file')]
+    output_body_frame_arg = DeclareLaunchArgument(
+        'output_body_frame',
+        default_value='FRD',
+        description='Output body coordinate frame (FLU, FRD, etc.)'
+    )
     
-    # Optional parameter overrides from command line
-    param_overrides = {}
-    
-    # Node
+    # Create the bridge node
     vicon_px4_bridge_node = Node(
         package='vicon_px4_bridge',
         executable='vicon_px4_bridge_node',
         name='vicon_px4_bridge',
         output='screen',
-        parameters=parameters,
-        remappings=[],
-        arguments=['--ros-args', '--log-level', 'info']
+        parameters=[
+            LaunchConfiguration('config_file'),
+            {
+                'vicon_topic_name': LaunchConfiguration('vicon_topic'),
+                'input_world_frame': LaunchConfiguration('input_world_frame'),
+                'output_world_frame': LaunchConfiguration('output_world_frame'),
+                'input_body_frame': LaunchConfiguration('input_body_frame'),
+                'output_body_frame': LaunchConfiguration('output_body_frame'),
+            }
+        ],
+        # Remap if needed
+        remappings=[
+            # Example remapping if your Vicon topic has a different name
+            # ('/vicon/drone/pose', '/your_actual_vicon_topic'),
+        ]
     )
     
     return LaunchDescription([
-        params_file_arg,
+        config_file_arg,
         vicon_topic_arg,
-        px4_topic_arg,
-        input_frame_arg,
-        output_frame_arg,
-        vicon_px4_bridge_node
+        input_world_frame_arg,
+        output_world_frame_arg,
+        input_body_frame_arg,
+        output_body_frame_arg,
+        vicon_px4_bridge_node,
+    ])
+
+
+# Alternative: Simplified launch without arguments
+def generate_simple_launch_description():
+    """
+    Simplified launch file that uses only the config file.
+    Use this if you prefer to configure everything in the YAML file.
+    """
+    return LaunchDescription([
+        Node(
+            package='vicon_px4_bridge',
+            executable='vicon_px4_bridge_node',
+            name='vicon_px4_bridge',
+            output='screen',
+            parameters=[
+                PathJoinSubstitution([
+                    FindPackageShare('vicon_px4_bridge'),
+                    'config',
+                    'vicon_px4_bridge_params.yaml'
+                ])
+            ],
+        )
     ])

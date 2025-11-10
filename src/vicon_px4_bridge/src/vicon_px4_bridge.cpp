@@ -6,47 +6,69 @@ ViconPX4Bridge::ViconPX4Bridge() : Node("vicon_px4_bridge")
     this->declare_parameter<std::string>("vicon_topic_name", "/vicon/drone/pose");
     this->declare_parameter<std::string>("px4_topic_name", "/fmu/in/vehicle_visual_odometry");
     this->declare_parameter<std::string>("vicon_topic_type", "pose");
-    this->declare_parameter<std::string>("input_frame", "ENU");
-    this->declare_parameter<std::string>("output_frame", "NED");
+    this->declare_parameter<std::string>("input_world_frame", "ENU");
+    this->declare_parameter<std::string>("output_world_frame", "NED");
+    this->declare_parameter<std::string>("input_body_frame", "FLU");
+    this->declare_parameter<std::string>("output_body_frame", "FRD");
     
     // Get parameters
     vicon_topic_name_ = this->get_parameter("vicon_topic_name").as_string();
     px4_topic_name_ = this->get_parameter("px4_topic_name").as_string();
     vicon_topic_type_ = this->get_parameter("vicon_topic_type").as_string();
-    input_frame_ = this->get_parameter("input_frame").as_string();
-    output_frame_ = this->get_parameter("output_frame").as_string();
+    input_world_frame_ = this->get_parameter("input_world_frame").as_string();
+    output_world_frame_ = this->get_parameter("output_world_frame").as_string();
+    input_body_frame_ = this->get_parameter("input_body_frame").as_string();
+    output_body_frame_ = this->get_parameter("output_body_frame").as_string();
     
     RCLCPP_INFO(this->get_logger(), "=== Vicon PX4 Bridge Configuration ===");
     RCLCPP_INFO(this->get_logger(), "Vicon topic: %s", vicon_topic_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "PX4 topic: %s", px4_topic_name_.c_str());
     RCLCPP_INFO(this->get_logger(), "Topic type: %s", vicon_topic_type_.c_str());
-    RCLCPP_INFO(this->get_logger(), "Frame conversion: %s -> %s", 
-                input_frame_.c_str(), output_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "World frame: %s -> %s", 
+                input_world_frame_.c_str(), output_world_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "Body frame: %s -> %s", 
+                input_body_frame_.c_str(), output_body_frame_.c_str());
     
     // Validate frame types
-    if (input_frame_ != "ENU" && input_frame_ != "FLU" && input_frame_ != "NED") {
-        RCLCPP_ERROR(this->get_logger(), "Invalid input_frame: %s. Must be ENU, FLU, or NED", 
-                     input_frame_.c_str());
-        throw std::runtime_error("Invalid input frame");
-    }
+    std::vector<std::string> valid_frames = {"ENU", "FLU", "NED", "FRD"};
+    auto validate = [&](const std::string& frame, const std::string& name) {
+        if (std::find(valid_frames.begin(), valid_frames.end(), frame) == valid_frames.end()) {
+            RCLCPP_ERROR(this->get_logger(), "Invalid %s: %s", name.c_str(), frame.c_str());
+            throw std::runtime_error("Invalid frame: " + name);
+        }
+    };
     
-    if (output_frame_ != "NED" && output_frame_ != "ENU" && output_frame_ != "FLU") {
-        RCLCPP_ERROR(this->get_logger(), "Invalid output_frame: %s. Must be ENU, FLU, or NED", 
-                     output_frame_.c_str());
-        throw std::runtime_error("Invalid output frame");
-    }
+    validate(input_world_frame_, "input_world_frame");
+    validate(output_world_frame_, "output_world_frame");
+    validate(input_body_frame_, "input_body_frame");
+    validate(output_body_frame_, "output_body_frame");
     
-    // Calculate transformation matrix and quaternion
-    R_transform_ = getTransformationMatrix(input_frame_, output_frame_);
-    q_transform_ = getFrameRotation(input_frame_, output_frame_);
+    // Calculate transformation matrices and quaternions
+    // World frame transformation (left multiply)
+    R_world_transform_ = getTransformationMatrix(input_world_frame_, output_world_frame_);
+    q_world_transform_ = Eigen::Quaterniond(R_world_transform_);
     
-    RCLCPP_INFO(this->get_logger(), "Transformation matrix:");
+    // Body frame transformation (right multiply)
+    R_body_transform_ = getTransformationMatrix(input_body_frame_, output_body_frame_);
+    q_body_transform_ = Eigen::Quaterniond(R_body_transform_);
+    
+    RCLCPP_INFO(this->get_logger(), "World transformation matrix (%s -> %s):",
+                input_world_frame_.c_str(), output_world_frame_.c_str());
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(0,0), R_transform_(0,1), R_transform_(0,2));
+                R_world_transform_(0,0), R_world_transform_(0,1), R_world_transform_(0,2));
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(1,0), R_transform_(1,1), R_transform_(1,2));
+                R_world_transform_(1,0), R_world_transform_(1,1), R_world_transform_(1,2));
     RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
-                R_transform_(2,0), R_transform_(2,1), R_transform_(2,2));
+                R_world_transform_(2,0), R_world_transform_(2,1), R_world_transform_(2,2));
+    
+    RCLCPP_INFO(this->get_logger(), "Body transformation matrix (%s -> %s):",
+                input_body_frame_.c_str(), output_body_frame_.c_str());
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_body_transform_(0,0), R_body_transform_(0,1), R_body_transform_(0,2));
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_body_transform_(1,0), R_body_transform_(1,1), R_body_transform_(1,2));
+    RCLCPP_INFO(this->get_logger(), "[%.2f, %.2f, %.2f]", 
+                R_body_transform_(2,0), R_body_transform_(2,1), R_body_transform_(2,2));
     
     // Create publisher
     auto qos_px4 = rclcpp::SensorDataQoS();
@@ -84,26 +106,40 @@ Eigen::Matrix3d ViconPX4Bridge::getTransformationMatrix(const std::string& from_
         return R;
     }
     
-    // Define transformation matrices for each frame pair
+    // Define transformation matrices for common frame pairs
+    // Convention: R transforms a vector from 'from_frame' to 'to_frame'
+    // v_to = R * v_from
+    
     if (from_frame == "ENU" && to_frame == "NED") {
         // ENU: X=East, Y=North, Z=Up
         // NED: X=North, Y=East, Z=Down
-        // Transformation: [X_ned, Y_ned, Z_ned]^T = R * [X_enu, Y_enu, Z_enu]^T
         R << 0,  1,  0,   // X_ned = Y_enu (North)
              1,  0,  0,   // Y_ned = X_enu (East)
-             0,  0, -1;   // Z_ned = -Z_enu (Down = -Up)
+             0,  0, -1;   // Z_ned = -Z_enu (Down)
     }
     else if (from_frame == "NED" && to_frame == "ENU") {
         // NED to ENU (inverse of above)
         R << 0,  1,  0,   // X_enu = Y_ned (East)
              1,  0,  0,   // Y_enu = X_ned (North)
-             0,  0, -1;   // Z_enu = -Z_ned (Up = -Down)
+             0,  0, -1;   // Z_enu = -Z_ned (Up)
+    }
+    else if (from_frame == "FLU" && to_frame == "FRD") {
+        // FLU: X=Forward, Y=Left, Z=Up
+        // FRD: X=Forward, Y=Right, Z=Down
+        R << 1,  0,  0,   // X_frd = X_flu (Forward)
+             0, -1,  0,   // Y_frd = -Y_flu (Right = -Left)
+             0,  0, -1;   // Z_frd = -Z_flu (Down = -Up)
+    }
+    else if (from_frame == "FRD" && to_frame == "FLU") {
+        // FRD to FLU (inverse of above)
+        R << 1,  0,  0,   // X_flu = X_frd (Forward)
+             0, -1,  0,   // Y_flu = -Y_frd (Left = -Right)
+             0,  0, -1;   // Z_flu = -Z_frd (Up = -Down)
     }
     else if (from_frame == "FLU" && to_frame == "NED") {
-        // FLU: X=Forward, Y=Left, Z=Up (body frame, assuming Forward=North at zero yaw)
-        // NED: X=North, Y=East, Z=Down
+        // FLU to NED: assuming FLU Forward aligns with North
         R << 1,  0,  0,   // X_ned = X_flu (Forward=North)
-             0, -1,  0,   // Y_ned = -Y_flu (East=-Left, Right=East)
+             0, -1,  0,   // Y_ned = -Y_flu (East=-Left)
              0,  0, -1;   // Z_ned = -Z_flu (Down=-Up)
     }
     else if (from_frame == "NED" && to_frame == "FLU") {
@@ -112,40 +148,40 @@ Eigen::Matrix3d ViconPX4Bridge::getTransformationMatrix(const std::string& from_
              0, -1,  0,   // Y_flu = -Y_ned (Left=-East)
              0,  0, -1;   // Z_flu = -Z_ned (Up=-Down)
     }
-    else if (from_frame == "ENU" && to_frame == "FLU") {
-        // ENU to FLU: First ENU->NED, then NED->FLU
+    else if (from_frame == "ENU" && to_frame == "FRD") {
+        // ENU to FRD: chain ENU->NED->FRD
         Eigen::Matrix3d R_enu_to_ned;
         R_enu_to_ned << 0,  1,  0,
                         1,  0,  0,
                         0,  0, -1;
-        Eigen::Matrix3d R_ned_to_flu;
-        R_ned_to_flu << 1,  0,  0,
-                        0, -1,  0,
-                        0,  0, -1;
+        Eigen::Matrix3d R_ned_to_frd;
+        R_ned_to_frd << 1,  0,  0,
+                        0,  1,  0,
+                        0,  0,  1;  // NED and FRD are same for world frame
+        R = R_ned_to_frd * R_enu_to_ned;
+    }
+    else if (from_frame == "FRD" && to_frame == "ENU") {
+        // FRD to ENU (inverse)
+        Eigen::Matrix3d R_frd_to_enu = getTransformationMatrix("ENU", "FRD").transpose();
+        R = R_frd_to_enu;
+    }
+    else if (from_frame == "ENU" && to_frame == "FLU") {
+        // ENU to FLU: chain ENU->NED->FLU
+        Eigen::Matrix3d R_enu_to_ned = getTransformationMatrix("ENU", "NED");
+        Eigen::Matrix3d R_ned_to_flu = getTransformationMatrix("NED", "FLU");
         R = R_ned_to_flu * R_enu_to_ned;
     }
     else if (from_frame == "FLU" && to_frame == "ENU") {
-        // FLU to ENU: inverse of above
-        Eigen::Matrix3d R_flu_to_ned;
-        R_flu_to_ned << 1,  0,  0,
-                        0, -1,  0,
-                        0,  0, -1;
-        Eigen::Matrix3d R_ned_to_enu;
-        R_ned_to_enu << 0,  1,  0,
-                        1,  0,  0,
-                        0,  0, -1;
-        R = R_ned_to_enu * R_flu_to_ned;
+        // FLU to ENU (inverse)
+        R = getTransformationMatrix("ENU", "FLU").transpose();
+    }
+    else {
+        RCLCPP_WARN(rclcpp::get_logger("vicon_px4_bridge"),
+                    "Unknown frame pair: %s -> %s, using identity",
+                    from_frame.c_str(), to_frame.c_str());
     }
     
     return R;
-}
-
-Eigen::Quaterniond ViconPX4Bridge::getFrameRotation(const std::string& from_frame,
-                                                    const std::string& to_frame)
-{
-    Eigen::Matrix3d R = getTransformationMatrix(from_frame, to_frame);
-    Eigen::Quaterniond q(R);
-    return q;
 }
 
 void ViconPX4Bridge::viconPoseCallback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
@@ -174,22 +210,37 @@ void ViconPX4Bridge::viconTransformCallback(
 void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Pose& pose_in,
                                    geometry_msgs::msg::Pose& pose_out)
 {
-    // Convert position using transformation matrix
+    // POSITION TRANSFORMATION
+    // Transform position using world frame transformation only
+    // p_out = R_world * p_in
     Eigen::Vector3d pos_in(pose_in.position.x, pose_in.position.y, pose_in.position.z);
-    Eigen::Vector3d pos_out = R_transform_ * pos_in;
+    Eigen::Vector3d pos_out = R_world_transform_ * pos_in;
     
     pose_out.position.x = pos_out.x();
     pose_out.position.y = pos_out.y();
     pose_out.position.z = pos_out.z();
     
-    // Convert orientation quaternion
-    Eigen::Quaterniond q_in(pose_in.orientation.w, pose_in.orientation.x,
-                           pose_in.orientation.y, pose_in.orientation.z);
+    // ORIENTATION TRANSFORMATION
+    // Input quaternion: q_in represents rotation from input_world_frame to input_body_frame
+    // Output quaternion: q_out represents rotation from output_world_frame to output_body_frame
+    //
+    // Transformation formula:
+    // q_out = q_world_transform * q_in * q_body_transform
+    //         └──────┬──────┘         └──────┬──────┘
+    //         Left multiply:         Right multiply:
+    //         World frame            Body frame
+    //         transformation         transformation
+    //
+    // This is equivalent to: R_out = R_world * R_in * R_body
     
-    // Apply frame rotation: q_out = q_frame_rotation * q_in * q_frame_rotation^-1
-    // But for our coordinate frame changes, we use: q_out = q_frame_rotation * q_in
-    Eigen::Quaterniond q_out = q_transform_ * q_in * q_transform_.inverse();
-    q_out.normalize();
+    Eigen::Quaterniond q_in(pose_in.orientation.w, 
+                           pose_in.orientation.x,
+                           pose_in.orientation.y, 
+                           pose_in.orientation.z);
+    
+    // Apply double transformation: world frame change AND body frame change
+    Eigen::Quaterniond q_out = q_world_transform_ * q_in * q_body_transform_;
+    q_out.normalize();  // Ensure unit quaternion
     
     pose_out.orientation.w = q_out.w();
     pose_out.orientation.x = q_out.x();
@@ -200,21 +251,26 @@ void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Pose& pose_in,
 void ViconPX4Bridge::convertFrame(const geometry_msgs::msg::Transform& transform_in,
                                    geometry_msgs::msg::Transform& transform_out)
 {
-    // Convert translation
+    // TRANSLATION TRANSFORMATION
+    // Transform translation using world frame transformation
     Eigen::Vector3d trans_in(transform_in.translation.x, 
                             transform_in.translation.y, 
                             transform_in.translation.z);
-    Eigen::Vector3d trans_out = R_transform_ * trans_in;
+    Eigen::Vector3d trans_out = R_world_transform_ * trans_in;
     
     transform_out.translation.x = trans_out.x();
     transform_out.translation.y = trans_out.y();
     transform_out.translation.z = trans_out.z();
     
-    // Convert rotation
-    Eigen::Quaterniond q_in(transform_in.rotation.w, transform_in.rotation.x,
-                           transform_in.rotation.y, transform_in.rotation.z);
+    // ROTATION TRANSFORMATION
+    // Apply double transformation similar to pose conversion
+    Eigen::Quaterniond q_in(transform_in.rotation.w, 
+                           transform_in.rotation.x,
+                           transform_in.rotation.y, 
+                           transform_in.rotation.z);
     
-    Eigen::Quaterniond q_out = q_transform_ * q_in;
+    // Double transformation: q_out = q_world_transform * q_in * q_body_transform
+    Eigen::Quaterniond q_out = q_world_transform_ * q_in * q_body_transform_;
     q_out.normalize();
     
     transform_out.rotation.w = q_out.w();
@@ -235,12 +291,13 @@ void ViconPX4Bridge::publishToPX4(const geometry_msgs::msg::Pose& pose_output,
     // Set pose frame to NED (local frame) - PX4 always expects NED
     odom_msg.pose_frame = px4_msgs::msg::VehicleOdometry::POSE_FRAME_NED;
     
-    // Position
+    // Position in NED frame
     odom_msg.position[0] = static_cast<float>(pose_output.position.x);
     odom_msg.position[1] = static_cast<float>(pose_output.position.y);
     odom_msg.position[2] = static_cast<float>(pose_output.position.z);
     
     // Orientation quaternion (w, x, y, z in PX4)
+    // This represents rotation from NED to FRD (body frame)
     odom_msg.q[0] = static_cast<float>(pose_output.orientation.w);
     odom_msg.q[1] = static_cast<float>(pose_output.orientation.x);
     odom_msg.q[2] = static_cast<float>(pose_output.orientation.y);

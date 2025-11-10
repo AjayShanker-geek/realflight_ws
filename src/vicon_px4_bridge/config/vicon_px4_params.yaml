@@ -7,8 +7,13 @@
     # PX4 topic configuration
     px4_topic_name: "/fmu/in/vehicle_visual_odometry"
     
-    # Frame configuration
-    # input_frame options: "ENU", "FLU", "NED"
-    # output_frame options: "NED", "ENU", "FLU" (PX4 requires "NED")
-    input_frame: "ENU"
-    output_frame: "NED"
+    
+    # World coordinate frame transformation
+    # Common options: "ENU" (East-North-Up), "NED" (North-East-Down)
+    input_world_frame: "ENU"    # Vicon typically uses ENU
+    output_world_frame: "NED"   # PX4 requires NED
+    
+    # Body coordinate frame transformation
+    # Common options: "FLU" (Forward-Left-Up), "FRD" (Forward-Right-Down)
+    input_body_frame: "FLU"     # Vicon/ROS typically uses FLU
+    output_body_frame: "FRD"    # PX4 requires FRD
