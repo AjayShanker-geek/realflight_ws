@@ -18,11 +18,11 @@ def generate_launch_description() -> LaunchDescription:
     
     # Single drone configuration
     drone_id = 0
-    takeoff_altitude = 1.5  # meters above ground
+    takeoff_altitude = 1.2  # meters above ground
     
     # In NED frame: x=North, y=East, z=Down
     # Takeoff position: hover at origin with 1.2m altitude
-    goto_x = - 1.50   
+    goto_x = 1.50   
     goto_y = 0.0    
     goto_z = -takeoff_altitude  # NED: negative means up
     
