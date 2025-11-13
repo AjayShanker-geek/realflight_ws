@@ -30,9 +30,6 @@ enum class FsmState {
   DONE = 8
 };
 
-// ============================================================================
-// MINIMUM JERK TRAJECTORY SEGMENT - FULL DEFINITION IN HEADER
-// ============================================================================
 // This must be a complete type (not forward declaration) because std::optional
 // needs to know the size and layout of the type at compile time
 struct MJerkSegment {
@@ -169,6 +166,9 @@ private:
   double landing_x_;
   double landing_y_;
   double landing_start_z_;
+  bool vel_initialized_;
+  bool has_final_setpoint_;
+  int final_setpoint_hold_count_;
   
   // Current position from odometry
   double current_x_;
@@ -194,17 +194,13 @@ private:
   Eigen::Vector3d final_position_{0, 0, 0};
   Eigen::Vector3d final_velocity_{0, 0, 0};
   Eigen::Vector3d final_acceleration_{0, 0, 0};
-  bool has_final_setpoint_{false};
   
-  // ========================================================================
   // MINIMUM JERK TRAJECTORY STATE
-  // ========================================================================
   std::optional<MJerkSegment> active_seg_;  // Current trajectory segment
   
   // Velocity estimation for smooth transitions
   Eigen::Vector3d current_vel_{0.0, 0.0, 0.0};
   Eigen::Vector3d last_pos_{0.0, 0.0, 0.0};
-  bool vel_initialized_{false};
 };
 
 #endif  // OFFBOARD_FSM_NODE_HPP_
