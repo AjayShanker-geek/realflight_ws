@@ -81,6 +81,6 @@ then
 fi
 
 sleep 1
-uxrce_dds_client status
+# uxrce_dds_client status
 
 unset DDS_NS
