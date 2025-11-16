@@ -3,15 +3,18 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import EnvironmentVariable
 
 
 def generate_launch_description():
     """Launch trajectory test node for a single drone."""
+
+    drone_id_env = EnvironmentVariable('DRONE_ID', default_value='0')
     
     # Declare launch arguments
     drone_id_arg = DeclareLaunchArgument(
         'drone_id',
-        default_value='0',
+        default_value=drone_id_env,
         description='Drone ID'
     )
     

@@ -6,7 +6,9 @@ Launches one drone that takes off to 1.5m and hovers at the takeoff position
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
-
+from launch.substitutions import EnvironmentVariable
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description() -> LaunchDescription:
     """
@@ -17,7 +19,13 @@ def generate_launch_description() -> LaunchDescription:
     """
     
     # Single drone configuration
-    drone_id = 0
+    drone_id_env = EnvironmentVariable('DRONE_ID', default_value='0')
+    drone_id_arg = DeclareLaunchArgument(
+        'drone_id',
+        default_value=drone_id_env,
+        description='Drone ID'
+    )
+    drone_id = LaunchConfiguration('drone_id')
     takeoff_altitude = 1.2  # meters above ground
     
     # In NED frame: x=North, y=East, z=Down
@@ -29,7 +37,7 @@ def generate_launch_description() -> LaunchDescription:
     fsm_node = Node(
         package="offboard_state_machine",
         executable="offboard_fsm_node",
-        name=f"offboard_fsm_node_{drone_id}",
+        name=["offboard_fsm_node_", drone_id],
         output="screen",
         parameters=[{
             "drone_id": drone_id,
@@ -53,5 +61,6 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     return LaunchDescription([
-        fsm_node
+        drone_id_arg,
+        fsm_node,
     ])

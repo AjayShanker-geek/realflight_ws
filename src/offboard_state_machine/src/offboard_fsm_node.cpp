@@ -283,6 +283,14 @@ void OffboardFSM::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
     use_attitude_control_ = true;
   }
 
+  if (new_state == FsmState::END_TRAJ) {
+    hover_x_ = current_x_;
+    hover_y_ = current_y_;
+    hover_z_ = current_z_;
+    RCLCPP_INFO(get_logger(), "END_TRAJ: Hover at [%.2f, %.2f, %.2f]",
+                hover_x_, hover_y_, hover_z_);
+  }
+
   current_state_ = new_state;
   RCLCPP_WARN(get_logger(), "State override to %d", s);
 }
@@ -403,7 +411,7 @@ void OffboardFSM::start_mjerk_segment(const Eigen::Vector3d& p_target,
 }
 
 
-/*  Publish Trajectory Setpoint                                      */
+//  Publish Trajectory Setpoint                                      
 
 void OffboardFSM::publish_current_setpoint()
 {
@@ -418,7 +426,7 @@ void OffboardFSM::publish_current_setpoint()
     sp.velocity[i] = std::nanf("");
     sp.acceleration[i] = std::nanf("");
   }
-  sp.yaw = 0.0f;
+  sp.yaw = 3.1415926f;
   sp.yawspeed = 0.0f;
 
   if (active_seg_.has_value()) {

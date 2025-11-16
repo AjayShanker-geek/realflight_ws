@@ -288,7 +288,7 @@ void TrajTestNode::generate_circular_trajectory(double t)
   vz = 0.0;
   
   // Yaw pointing forward
-  yaw = 0.0;
+  yaw = 3.1415926f;
   
   // Publish setpoint
   publish_trajectory_setpoint(x, y, z, vx, vy, vz, yaw);

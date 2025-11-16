@@ -50,6 +50,7 @@ def launch_setup(context, *args, **kwargs):
                 output="screen",
                 parameters=[{
                     "drone_id": i,
+                    "takeoff_alt": - float(drone_pos_NED[i, 2]),  # metres above ground
                     "goto_x":   float(drone_pos_NED[i, 0]),
                     "goto_y":   float(drone_pos_NED[i, 1]),
                     "goto_z":   float(drone_pos_NED[i, 2]),

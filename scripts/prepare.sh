@@ -30,12 +30,17 @@ echo "======================================"
 echo "sync with remote time server if ssh connected..."
 echo "======================================"
 
-if [[ -n "$SSH_CONNECTION" ]]; then
-    REMOTE_IP=$(echo $SSH_CONNECTION | awk '{print $1}')
-    if command -v ntpdate >/dev/null 2>&1; then
-        sudo ntpdate -u "$REMOTE_IP" && echo "time already sync with $REMOTE_IP."
-    fi
+export TIMESYNC_IP="192.168.1.3"
+if command -v ntpdate >/dev/null 2>&1; then
+    sudo ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
 fi
+
+# if [[ -n "$SSH_CONNECTION" ]]; then
+#     REMOTE_IP=$(echo $SSH_CONNECTION | awk '{print $1}')
+#     if command -v ntpdate >/dev/null 2>&1; then
+#         sudo ntpdate -u "$REMOTE_IP" && echo "time already sync with $REMOTE_IP."
+#     fi
+# fi
 
 echo "======================================"
 echo "Checking Environment Variables..."
