@@ -37,9 +37,9 @@ def read_first_trajectory_point(drone_id: str):
         first_row = next(csv_reader)
         
         # Assuming CSV format: x, y, z
-        x = float(first_row[0])
-        y = float(first_row[1])
-        z = float(first_row[2])
+        x = float(first_row[1])
+        y = float(first_row[2])
+        z = float(first_row[3])
         
         return x, y, z
 

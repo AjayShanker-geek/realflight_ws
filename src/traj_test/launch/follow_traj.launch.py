@@ -11,7 +11,7 @@ def generate_launch_description():
     # Declare launch arguments
     total_drones_arg = DeclareLaunchArgument(
         'total_drones',
-        default_value='3',
+        default_value='1',
         description='Total number of drones in the swarm'
     )
     
@@ -50,12 +50,12 @@ def launch_setup(context, *args, **kwargs):
     
     nodes = []
     
-    # Create a node for each drone
+    # Create follow_traj node for each drone
     for drone_id in range(total_drones):
         csv_path = f"{csv_base_path}/drone_{drone_id}_traj.csv"
         
         node = Node(
-            package='follow_traj',
+            package='traj_test',
             executable='follow_traj_node',
             name=f'follow_traj_node_{drone_id}',
             namespace='',
@@ -64,16 +64,27 @@ def launch_setup(context, *args, **kwargs):
                 'timer_period': float(timer_period),
                 'csv_path': csv_path,
                 'yaw_setpoint': float(yaw_setpoint),
-                'use_sim_time': True  # Enable if using simulation
             }],
             output='screen',
             emulate_tty=True,
         )
         nodes.append(node)
     
-    # Add a log message
+    # Add swarm coordinator node
+    coordinator_node = Node(
+        package='traj_test',
+        executable='swarm_coordinator_node',
+        name='swarm_coordinator',
+        namespace='',
+        arguments=[str(total_drones)],
+        output='screen',
+        emulate_tty=True,
+    )
+    nodes.append(coordinator_node)
+    
+    # Add log messages
     nodes.append(
-        LogInfo(msg=f'Launching {total_drones} follow_traj nodes')
+        LogInfo(msg=f'Launching {total_drones} follow_traj nodes + coordinator')
     )
     
     return nodes

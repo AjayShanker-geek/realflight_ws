@@ -32,11 +32,22 @@ add_executable(follow_traj_node
   src/follow_traj_node.cpp
   src/follow_traj_main.cpp
 )
+
 ament_target_dependencies(follow_traj_node
   rclcpp
   std_msgs
   px4_msgs
   offboard_state_machine
+)
+
+add_executable(swarm_coordinator_node
+  src/swarm_coordinator_node.cpp
+  src/swarm_coordinator_main.cpp
+)
+
+ament_target_dependencies(swarm_coordinator_node
+  rclcpp
+  std_msgs
 )
 
 install(DIRECTORY include/
@@ -47,6 +58,7 @@ install(DIRECTORY include/
 install(TARGETS
   traj_test_node
   follow_traj_node
+  swarm_coordinator_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

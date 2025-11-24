@@ -79,7 +79,7 @@ private:
   bool traj_started_;
   bool traj_completed_;
   rclcpp::Time traj_start_time_;
-  
+  bool traj_time_initialized_;
   // Odometry
   double current_x_, current_y_, current_z_;
   bool odom_ready_;

@@ -13,6 +13,7 @@ FollowTrajNode::FollowTrajNode(int drone_id, int total_drones)
   , waiting_for_swarm_(false)
   , traj_started_(false)
   , traj_completed_(false)
+  , traj_time_initialized_(false)  // NEW FLAG
   , current_x_(0.0)
   , current_y_(0.0)
   , current_z_(0.0)
@@ -42,27 +43,29 @@ FollowTrajNode::FollowTrajNode(int drone_id, int total_drones)
     return;
   }
   
-  // Publishers
+  // Publishers - RELIABLE QoS for critical messages
   traj_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
     px4_namespace_ + "in/trajectory_setpoint", 
-    rclcpp::QoS(1));
+    rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE));
     
   state_cmd_pub_ = this->create_publisher<std_msgs::msg::Int32>(
     "/state/command_drone_" + std::to_string(drone_id_), 
-    rclcpp::QoS(10));
+    rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE));
   
-  // Subscribe to own state
+  // Subscribe to own state - RELIABLE QoS
   state_sub_ = this->create_subscription<std_msgs::msg::Int32>(
     "/state/state_drone_" + std::to_string(drone_id_),
-    rclcpp::QoS(10),
+    rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE),
     std::bind(&FollowTrajNode::state_callback, this, std::placeholders::_1));
   
-  // Subscribe to all other drones' states
+  RCLCPP_INFO(this->get_logger(), "Subscribed to own state: /state/state_drone_%d", drone_id_);
+  
+  // Subscribe to all other drones' states - RELIABLE QoS
   for (int i = 0; i < total_drones_; i++) {
     if (i != drone_id_) {
       auto sub = this->create_subscription<std_msgs::msg::Int32>(
         "/state/state_drone_" + std::to_string(i),
-        rclcpp::QoS(10),
+        rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE),
         [this, i](const std_msgs::msg::Int32::SharedPtr msg) {
           this->swarm_state_callback(msg, i);
         });
@@ -76,6 +79,9 @@ FollowTrajNode::FollowTrajNode(int drone_id, int total_drones)
     px4_namespace_ + "out/vehicle_odometry",
     rclcpp::SensorDataQoS(),
     std::bind(&FollowTrajNode::odom_callback, this, std::placeholders::_1));
+  
+  RCLCPP_INFO(this->get_logger(), "Subscribed to odometry: %sout/vehicle_odometry", 
+              px4_namespace_.c_str());
   
   // Timer
   timer_ = rclcpp::create_timer(
@@ -222,29 +228,59 @@ bool FollowTrajNode::all_drones_in_traj_state()
 
 void FollowTrajNode::state_callback(const std_msgs::msg::Int32::SharedPtr msg)
 {
+  auto old_state = current_state_;
   auto state = static_cast<FsmState>(msg->data);
   current_state_ = state;
   swarm_states_[drone_id_] = state;  // Update own state in swarm map
   
+  // Log state changes
+  if (old_state != state) {
+    RCLCPP_WARN(this->get_logger(), 
+                "STATE CHANGE: %d -> %d", 
+                static_cast<int>(old_state), static_cast<int>(state));
+  }
+  
   // When entering TRAJ state, check if we should start waiting for swarm
   if (state == FsmState::TRAJ && !waiting_for_swarm_ && !traj_started_ && !traj_completed_) {
     waiting_for_swarm_ = true;
-    RCLCPP_INFO(this->get_logger(), "Entered TRAJ state, waiting for swarm sync...");
+    RCLCPP_WARN(this->get_logger(), 
+                ">>> Entered TRAJ state, waiting for swarm sync...");
+    
+    // OPTIMIZATION: For single drone, skip swarm synchronization
+    if (total_drones_ == 1) {
+      traj_started_ = true;
+      waiting_for_swarm_ = false;
+      // DON'T set traj_start_time_ here - let timer callback do it!
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
+      RCLCPP_WARN(this->get_logger(),
+                  "SINGLE DRONE - READY TO START TRAJECTORY");
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
+    }
   }
   
-  // Start trajectory when all drones are in TRAJ state
+  // Start trajectory when all drones are in TRAJ state (multi-drone case)
   if (waiting_for_swarm_ && !traj_started_ && all_drones_in_traj_state()) {
     traj_started_ = true;
     waiting_for_swarm_ = false;
-    traj_start_time_ = this->now();
-    RCLCPP_INFO(this->get_logger(), "All drones in TRAJ state - Starting trajectory!");
+    // DON'T set traj_start_time_ here - let timer callback do it!
+    RCLCPP_WARN(this->get_logger(), 
+                "========================================");
+    RCLCPP_WARN(this->get_logger(),
+                "ALL DRONES IN TRAJ - READY TO START TRAJECTORY");
+    RCLCPP_WARN(this->get_logger(), 
+                "========================================");
   }
   
   // Handle premature exit from TRAJ
   if (traj_started_ && state != FsmState::TRAJ && !traj_completed_) {
     traj_started_ = false;
     waiting_for_swarm_ = false;
-    RCLCPP_WARN(this->get_logger(), "Left TRAJ state early, resetting");
+    traj_time_initialized_ = false;  // Reset time initialization flag
+    RCLCPP_ERROR(this->get_logger(), 
+                 "!!! Left TRAJ state early (to state %d), resetting !!!", 
+                 static_cast<int>(state));
   }
 }
 
@@ -268,8 +304,13 @@ void FollowTrajNode::swarm_state_callback(
     if (all_drones_in_traj_state() && !traj_started_) {
       traj_started_ = true;
       waiting_for_swarm_ = false;
-      traj_start_time_ = this->now();
-      RCLCPP_INFO(this->get_logger(), "All drones in TRAJ state - Starting trajectory!");
+      // DON'T set traj_start_time_ here - let timer callback do it!
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
+      RCLCPP_WARN(this->get_logger(),
+                  "ALL DRONES IN TRAJ - READY TO START TRAJECTORY");
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
     }
   }
 }
@@ -285,6 +326,15 @@ void FollowTrajNode::odom_callback(
 
 void FollowTrajNode::timer_callback()
 {
+  // Debug state periodically
+  static int debug_counter = 0;
+  if (debug_counter++ % 100 == 0) {  // Every 2s at 50Hz
+    RCLCPP_INFO(this->get_logger(), 
+                "State: %d, traj_started: %d, time_init: %d, waiting_swarm: %d, completed: %d, odom: %d",
+                static_cast<int>(current_state_), traj_started_, traj_time_initialized_,
+                waiting_for_swarm_, traj_completed_, odom_ready_);
+  }
+  
   if (!odom_ready_) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                          "Waiting for odometry");
@@ -299,13 +349,36 @@ void FollowTrajNode::timer_callback()
   
   // Execute trajectory only when started and in TRAJ state
   if (current_state_ == FsmState::TRAJ && traj_started_ && !traj_completed_) {
+    
+    // CRITICAL FIX: Initialize start time on FIRST timer execution, not in callback
+    if (!traj_time_initialized_) {
+      traj_start_time_ = this->now();
+      traj_time_initialized_ = true;
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
+      RCLCPP_WARN(this->get_logger(),
+                  "TRAJECTORY EXECUTION STARTED (t=0.00s)");
+      RCLCPP_WARN(this->get_logger(), 
+                  "========================================");
+    }
+    
     double elapsed = (this->now() - traj_start_time_).seconds();
     
     // Check if trajectory is complete
     if (elapsed >= trajectory_.back().time) {
       if (!traj_completed_) {
-        RCLCPP_INFO(this->get_logger(), "Trajectory complete!");
-        send_state_command(static_cast<int>(FsmState::END_TRAJ));
+        RCLCPP_WARN(this->get_logger(), 
+                    "========================================");
+        RCLCPP_WARN(this->get_logger(),
+                    "TRAJECTORY COMPLETE - SENDING END_TRAJ");
+        RCLCPP_WARN(this->get_logger(), 
+                    "========================================");
+        
+        // Send END_TRAJ command multiple times like traj_test
+        for (int i = 0; i < 5; i++) {
+          send_state_command(static_cast<int>(FsmState::END_TRAJ));
+        }
+        
         traj_completed_ = true;
       }
       return;
@@ -319,9 +392,13 @@ void FollowTrajNode::timer_callback()
     
     // Debug logging
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                         "t=%.2fs | pos=(%.2f,%.2f,%.2f) | vel=(%.2f,%.2f,%.2f)",
+                         "EXECUTING TRAJ: t=%.2fs | pos=(%.2f,%.2f,%.2f) | vel=(%.2f,%.2f,%.2f)",
                          elapsed, point.x, point.y, point.z,
                          point.vx, point.vy, point.vz);
+  } else if (current_state_ == FsmState::TRAJ && waiting_for_swarm_) {
+    // In TRAJ state but waiting for swarm
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "In TRAJ state, waiting for swarm synchronization...");
   }
 }
 
