@@ -11,7 +11,7 @@ def generate_launch_description():
     # Declare launch arguments
     total_drones_arg = DeclareLaunchArgument(
         'total_drones',
-        default_value='1',
+        default_value='3',
         description='Total number of drones in the swarm'
     )
     
@@ -23,8 +23,8 @@ def generate_launch_description():
     
     timer_period_arg = DeclareLaunchArgument(
         'timer_period',
-        default_value='0.02',
-        description='Timer period in seconds (default 50Hz)'
+        default_value='0.01',
+        description='Timer period in seconds (default 100Hz)'
     )
     
     yaw_setpoint_arg = DeclareLaunchArgument(
