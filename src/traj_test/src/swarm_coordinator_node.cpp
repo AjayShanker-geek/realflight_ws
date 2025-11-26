@@ -7,38 +7,73 @@ SwarmCoordinator::SwarmCoordinator(int total_drones)
 {
   RCLCPP_INFO(this->get_logger(), "=== Swarm Coordinator initialized for %d drones ===", total_drones_);
   
-  // Initialize state tracking
-  for (int i = 0; i < total_drones_; i++) {
-    drone_states_[i] = -1;  // Unknown state initially
+  // NEW: Declare and get drone_ids parameter
+  this->declare_parameter<std::vector<int64_t>>("drone_ids", std::vector<int64_t>{});
+  std::vector<int64_t> drone_ids_param = this->get_parameter("drone_ids").as_integer_array();
+  
+  // Convert int64_t to int and store
+  if (drone_ids_param.empty()) {
+    // Fallback: use sequential IDs 0, 1, 2, ...
+    RCLCPP_WARN(this->get_logger(), "No drone_ids parameter found, using default sequential IDs");
+    for (int i = 0; i < total_drones_; i++) {
+      drone_ids_.push_back(i);
+    }
+  } else {
+    for (auto id : drone_ids_param) {
+      drone_ids_.push_back(static_cast<int>(id));
+    }
   }
   
-  // Subscribe to all drone states with RELIABLE QoS
-  for (int i = 0; i < total_drones_; i++) {
+  // Validate
+  if (drone_ids_.size() != static_cast<size_t>(total_drones_)) {
+    RCLCPP_ERROR(this->get_logger(), 
+                 "Mismatch: total_drones=%d but got %zu drone IDs", 
+                 total_drones_, drone_ids_.size());
+    throw std::runtime_error("Drone ID count mismatch");
+  }
+  
+  // Log the drone IDs being used
+  std::stringstream ss;
+  ss << "Using drone IDs: [";
+  for (size_t i = 0; i < drone_ids_.size(); i++) {
+    ss << drone_ids_[i];
+    if (i < drone_ids_.size() - 1) ss << ", ";
+  }
+  ss << "]";
+  RCLCPP_INFO(this->get_logger(), "%s", ss.str().c_str());
+  
+  // Initialize state tracking with custom IDs
+  for (int drone_id : drone_ids_) {
+    drone_states_[drone_id] = -1;  // Unknown state initially
+  }
+  
+  // Subscribe to all drone states with RELIABLE QoS using custom IDs
+  for (int drone_id : drone_ids_) {
     auto qos = rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
     
     auto sub = this->create_subscription<std_msgs::msg::Int32>(
-      "/state/state_drone_" + std::to_string(i),
+      "/state/state_drone_" + std::to_string(drone_id),
       qos,
-      [this, i](const std_msgs::msg::Int32::SharedPtr msg) {
-        this->state_callback(msg, i);
+      [this, drone_id](const std_msgs::msg::Int32::SharedPtr msg) {
+        this->state_callback(msg, drone_id);
       });
     state_subs_.push_back(sub);
     
-    RCLCPP_INFO(this->get_logger(), "Subscribed to /state/state_drone_%d", i);
+    RCLCPP_INFO(this->get_logger(), "Subscribed to /state/state_drone_%d", drone_id);
   }
   
-  // Create command publishers with RELIABLE QoS
-  for (int i = 0; i < total_drones_; i++) {
+  // Create command publishers with RELIABLE QoS using custom IDs
+  for (int drone_id : drone_ids_) {
     auto qos = rclcpp::QoS(10).reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
     auto pub = this->create_publisher<std_msgs::msg::Int32>(
-      "/state/command_drone_" + std::to_string(i),
+      "/state/command_drone_" + std::to_string(drone_id),
       qos);
     cmd_pubs_.push_back(pub);
-    RCLCPP_INFO(this->get_logger(), "Created command publisher for drone %d", i);
+    RCLCPP_INFO(this->get_logger(), "Created command publisher for drone %d", drone_id);
   }
 
   // Timer at 10 Hz
- timer_ = rclcpp::create_timer(
+  timer_ = rclcpp::create_timer(
       this,
       this->get_clock(),
       rclcpp::Duration(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -81,13 +116,14 @@ void SwarmCoordinator::send_traj_command_to_all()
   RCLCPP_WARN(this->get_logger(),
               "SENDING TRAJ COMMAND TO ALL DRONES");
   
-  // Send MULTIPLE times like traj_test does to ensure delivery!
+  // Send MULTIPLE times to ensure delivery
   for (int repeat = 0; repeat < 5; repeat++) {
-    for (int i = 0; i < total_drones_; i++) {
+    for (size_t i = 0; i < drone_ids_.size(); i++) {
+      int drone_id = drone_ids_[i];
       cmd_pubs_[i]->publish(cmd);
       RCLCPP_INFO(this->get_logger(), 
                   "  -> Sent TRAJ (state=%d) to drone %d (attempt %d/5)", 
-                  TRAJ_STATE, i, repeat + 1);
+                  TRAJ_STATE, drone_id, repeat + 1);
     }
     // Small delay between retries for message delivery
     rclcpp::sleep_for(std::chrono::milliseconds(50));

@@ -251,12 +251,10 @@ void FollowTrajNode::state_callback(const std_msgs::msg::Int32::SharedPtr msg)
       traj_started_ = true;
       waiting_for_swarm_ = false;
       // DON'T set traj_start_time_ here - let timer callback do it!
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
       RCLCPP_WARN(this->get_logger(),
                   "SINGLE DRONE - READY TO START TRAJECTORY");
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
     }
   }
   
@@ -305,12 +303,10 @@ void FollowTrajNode::swarm_state_callback(
       traj_started_ = true;
       waiting_for_swarm_ = false;
       // DON'T set traj_start_time_ here - let timer callback do it!
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
       RCLCPP_WARN(this->get_logger(),
                   "ALL DRONES IN TRAJ - READY TO START TRAJECTORY");
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
     }
   }
 }
@@ -354,12 +350,10 @@ void FollowTrajNode::timer_callback()
     if (!traj_time_initialized_) {
       traj_start_time_ = this->now();
       traj_time_initialized_ = true;
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
       RCLCPP_WARN(this->get_logger(),
                   "TRAJECTORY EXECUTION STARTED (t=0.00s)");
-      RCLCPP_WARN(this->get_logger(), 
-                  "========================================");
+      
     }
     
     double elapsed = (this->now() - traj_start_time_).seconds();
@@ -413,9 +407,12 @@ void FollowTrajNode::publish_trajectory_setpoint(
   msg.position[1] = static_cast<float>(y);
   msg.position[2] = static_cast<float>(z);
   
-  msg.velocity[0] = static_cast<float>(vx);
-  msg.velocity[1] = static_cast<float>(vy);
-  msg.velocity[2] = static_cast<float>(vz);
+  // msg.velocity[0] = static_cast<float>(vx);
+  // msg.velocity[1] = static_cast<float>(vy);
+  // msg.velocity[2] = static_cast<float>(vz);
+  // msg.velocity[0] = 0.0f;
+  // msg.velocity[1] = 0.0f;
+  // msg.velocity[2] = 0.0f;
   
   msg.yaw = static_cast<float>(yaw);
   msg.timestamp = 0;  // Let PX4 assign timestamp

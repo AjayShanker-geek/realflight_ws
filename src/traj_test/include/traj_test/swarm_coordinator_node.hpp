@@ -18,6 +18,7 @@ private:
   void send_traj_command_to_all();
 
   int total_drones_;
+  std::vector<int> drone_ids_;
   bool traj_sent_;
   
   std::map<int, int> drone_states_;  // drone_id -> state
