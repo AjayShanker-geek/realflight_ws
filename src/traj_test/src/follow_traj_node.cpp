@@ -263,12 +263,10 @@ void FollowTrajNode::state_callback(const std_msgs::msg::Int32::SharedPtr msg)
     traj_started_ = true;
     waiting_for_swarm_ = false;
     // DON'T set traj_start_time_ here - let timer callback do it!
-    RCLCPP_WARN(this->get_logger(), 
-                "========================================");
+    
     RCLCPP_WARN(this->get_logger(),
                 "ALL DRONES IN TRAJ - READY TO START TRAJECTORY");
-    RCLCPP_WARN(this->get_logger(), 
-                "========================================");
+    
   }
   
   // Handle premature exit from TRAJ

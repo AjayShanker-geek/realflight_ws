@@ -138,13 +138,13 @@ void SwarmCoordinator::timer_callback()
   static int tick = 0;
   tick++;
   
-  // Periodic status logging
-  if (tick % 50 == 0) {
-    RCLCPP_INFO(this->get_logger(), "--- Status Check (tick=%d) ---", tick);
-    for (const auto& [drone_id, state] : drone_states_) {
-      RCLCPP_INFO(this->get_logger(), "  Drone %d: state=%d", drone_id, state);
-    }
-  }
+  // // Periodic status logging
+  // if (tick % 50 == 0) {
+  //   RCLCPP_INFO(this->get_logger(), "--- Status Check (tick=%d) ---", tick);
+  //   for (const auto& [drone_id, state] : drone_states_) {
+  //     RCLCPP_INFO(this->get_logger(), "  Drone %d: state=%d", drone_id, state);
+  //   }
+  // }
   
   // If already sent, do nothing
   if (traj_sent_) {
@@ -156,8 +156,8 @@ void SwarmCoordinator::timer_callback()
     RCLCPP_INFO(this->get_logger(), "All drones in HOVER state, sending TRAJ command...");
     send_traj_command_to_all();
   } else {
-    // Log waiting status every 5 ticks (0.5 seconds)
-    if (tick % 5 == 0) {
+    // Log waiting status every 20 ticks (2 seconds)
+    if (tick % 20 == 0) {
       int hover_count = 0;
       int unknown_count = 0;
       for (const auto& [drone_id, state] : drone_states_) {
