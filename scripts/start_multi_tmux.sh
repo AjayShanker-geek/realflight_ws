@@ -1,28 +1,31 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 SESSION_NAME="multi_uav_session"
-WS_DIR="$PWD"   # or set to your workspace path explicitly
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Kill old session if exists (optional)
-tmux kill-session -t "$SESSION_NAME" 2>/dev/null
+# Kill old session
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 
-# Create new session, window 0, pane 0, and start in workspace dir
+# Create session and split immediately
 tmux new-session -d -s "$SESSION_NAME" -c "$WS_DIR"
+tmux split-window -h -t "$SESSION_NAME" -c "$WS_DIR"
 
-# Pane 0: traj_test
-tmux send-keys -t "$SESSION_NAME:0.0" \
-  "source ./install/setup.bash && ros2 launch traj_test multi_follow.launch.py" C-m
+# Use pane IDs instead of numeric indexes so base-index settings don't break targeting
+readarray -t PANES < <(tmux list-panes -t "$SESSION_NAME" -F '#{pane_id}')
+LEFT_PANE="${PANES[0]}"
+RIGHT_PANE="${PANES[1]}"
 
-# Split window horizontally to create pane 1
-tmux split-window -h -t "$SESSION_NAME:0.0"
+# Send to LEFT pane
+tmux send-keys -t "$LEFT_PANE" "cd $WS_DIR" C-m
+tmux send-keys -t "$LEFT_PANE" "source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
+tmux send-keys -t "$LEFT_PANE" "ros2 launch traj_test multi_follow.launch.py" C-m
 
-# Pane 1: offboard_state_machine (start after 5s)
-tmux send-keys -t "$SESSION_NAME:0.1" \
-  "sleep 5 && source ./install/setup.bash && ros2 launch offboard_state_machine swarm_follow.launch.py" C-m
+# Send to RIGHT pane
+tmux send-keys -t "$RIGHT_PANE" "cd $WS_DIR" C-m
+tmux send-keys -t "$RIGHT_PANE" "sleep 5 && source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
+tmux send-keys -t "$RIGHT_PANE" "ros2 launch offboard_state_machine swarm_follow.launch.py" C-m
 
-# Attach or switch depending on whether we're already in tmux
-if [ -z "$TMUX" ]; then
-    tmux attach-session -t "$SESSION_NAME"
-else
-    tmux switch-client -t "$SESSION_NAME"
-fi
+# Attach
+tmux attach-session -t "$SESSION_NAME"
