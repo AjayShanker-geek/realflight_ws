@@ -829,8 +829,8 @@ void OffboardFSM::publish_offboard_mode()
   
   if (current_state_ == FsmState::TRAJ) {
     m.position     = true;
-    m.velocity     = false;
-    m.acceleration = false;
+    m.velocity     = true;
+    m.acceleration = true;
     m.attitude     = false;
     m.body_rate    = false;
   } else if (has_active_seg) {

@@ -26,6 +26,7 @@ struct TrajectoryPoint {
   double time;
   double x, y, z;
   double vx, vy, vz;
+  double ax, ay, az;
 };
 
 class FollowTrajNode : public rclcpp::Node
@@ -45,6 +46,7 @@ private:
   TrajectoryPoint interpolate_trajectory(double t);
   void publish_trajectory_setpoint(double x, double y, double z,
                                    double vx, double vy, double vz,
+                                   double ax, double ay, double az,
                                    double yaw);
   void send_state_command(int state);
   

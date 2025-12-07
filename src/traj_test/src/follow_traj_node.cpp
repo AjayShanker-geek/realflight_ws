@@ -131,7 +131,7 @@ bool FollowTrajNode::load_trajectory_from_csv(const std::string& filepath)
     TrajectoryPoint point;
     
     try {
-      // Parse CSV: time,x,y,z,vx,vy,vz
+      // Parse CSV: time,x,y,z,vx,vy,vz,ax,ay,az
       std::getline(ss, value, ',');
       point.time = std::stod(value);
       
@@ -152,6 +152,17 @@ bool FollowTrajNode::load_trajectory_from_csv(const std::string& filepath)
       
       std::getline(ss, value, ',');
       point.vz = std::stod(value);
+
+      std::getline(ss, value, ',');
+      point.ax = std::stod(value);
+
+      std::getline(ss, value, ',');
+      point.ay = std::stod(value);
+
+      std::getline(ss, value, ',');
+      point.az = std::stod(value);
+
+      // Remaining columns (jerk/rotation) are ignored
       
       trajectory_.push_back(point);
       point_count++;
@@ -212,6 +223,9 @@ TrajectoryPoint FollowTrajNode::interpolate_trajectory(double t)
   result.vx = p1.vx + alpha * (p2.vx - p1.vx);
   result.vy = p1.vy + alpha * (p2.vy - p1.vy);
   result.vz = p1.vz + alpha * (p2.vz - p1.vz);
+  result.ax = p1.ax + alpha * (p2.ax - p1.ax);
+  result.ay = p1.ay + alpha * (p2.ay - p1.ay);
+  result.az = p1.az + alpha * (p2.az - p1.az);
   
   return result;
 }
@@ -380,6 +394,7 @@ void FollowTrajNode::timer_callback()
     TrajectoryPoint point = interpolate_trajectory(elapsed);
     publish_trajectory_setpoint(point.x, point.y, point.z,
                                 point.vx, point.vy, point.vz,
+                                point.ax, point.ay, point.az,
                                 yaw_setpoint_);
     
     // Debug logging
@@ -397,6 +412,7 @@ void FollowTrajNode::timer_callback()
 void FollowTrajNode::publish_trajectory_setpoint(
   double x, double y, double z,
   double vx, double vy, double vz,
+  double ax, double ay, double az,
   double yaw)
 {
   px4_msgs::msg::TrajectorySetpoint msg;
@@ -408,6 +424,10 @@ void FollowTrajNode::publish_trajectory_setpoint(
   msg.velocity[0] = static_cast<float>(vx);
   msg.velocity[1] = static_cast<float>(vy);
   msg.velocity[2] = static_cast<float>(vz);
+
+  msg.acceleration[0] = static_cast<float>(ax);
+  msg.acceleration[1] = static_cast<float>(ay);
+  msg.acceleration[2] = static_cast<float>(az);
   // msg.velocity[0] = 0.0f;
   // msg.velocity[1] = 0.0f;
   // msg.velocity[2] = 0.0f;
