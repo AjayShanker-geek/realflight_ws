@@ -6,12 +6,14 @@ SwarmGotoCoordinator::SwarmGotoCoordinator(int total_drones)
   , total_drones_(total_drones)
   , goto_sent_(false)
   , traj_sent_(false)
+  , hover_ready_time_(0, 0, this->get_clock()->get_clock_type())
 {
   RCLCPP_INFO(this->get_logger(), "=== Swarm GOTO Coordinator for %d drones ===", total_drones_);
 
   this->declare_parameter<std::vector<int64_t>>("drone_ids", std::vector<int64_t>{});
   takeoff_alt_ = this->declare_parameter<double>("takeoff_alt", 0.4);
   alt_tol_ = this->declare_parameter<double>("alt_tol", 0.05);
+  hover_wait_time_ = this->declare_parameter<double>("hover_wait_time", 5.0);
   std::vector<int64_t> drone_ids_param = this->get_parameter("drone_ids").as_integer_array();
 
   if (drone_ids_param.empty()) {
@@ -171,9 +173,26 @@ void SwarmGotoCoordinator::timer_callback()
 
   if (!traj_sent_) {
     if (all_drones_ready_for_traj()) {
-      RCLCPP_INFO(this->get_logger(), "All drones in HOVER after GOTO, sending synchronized TRAJ");
-      send_traj_command_to_all();
+      if (!hover_timer_started_) {
+        hover_ready_time_ = this->now();
+        hover_timer_started_ = true;
+        RCLCPP_INFO(this->get_logger(),
+                    "All drones in HOVER after GOTO, starting %.1fs wait before TRAJ",
+                    hover_wait_time_);
+      } else {
+        double hover_wait = (this->now() - hover_ready_time_).seconds();
+        if (hover_wait >= hover_wait_time_) {
+          RCLCPP_INFO(this->get_logger(),
+                      "Hover wait complete (%.1fs >= %.1fs), sending synchronized TRAJ",
+                      hover_wait, hover_wait_time_);
+          send_traj_command_to_all();
+        } else if (tick % 20 == 0) {
+          RCLCPP_INFO(this->get_logger(),
+                      "Hover wait: %.1fs / %.1fs", hover_wait, hover_wait_time_);
+        }
+      }
     } else {
+      hover_timer_started_ = false;  // reset if anyone leaves HOVER
       if (tick % 20 == 0) {
         int hover_count = 0;
         int unknown_count = 0;

@@ -39,6 +39,9 @@ private:
 
   double takeoff_alt_;
   double alt_tol_;
+  double hover_wait_time_{0.0};
+  rclcpp::Time hover_ready_time_;
+  bool hover_timer_started_{false};
 
   static constexpr int HOVER_STATE = 4;
   static constexpr int GOTO_STATE = 3;
