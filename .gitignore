@@ -2,6 +2,16 @@
 build/
 install/
 log/
+rosbags/
 
 # vscode settings
 .vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# cached data
+.DS_Store

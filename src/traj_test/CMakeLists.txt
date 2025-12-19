@@ -28,6 +28,39 @@ ament_target_dependencies(traj_test_node
   offboard_state_machine
 )
 
+add_executable(follow_traj_node
+  src/follow_traj_node.cpp
+  src/follow_traj_main.cpp
+)
+
+ament_target_dependencies(follow_traj_node
+  rclcpp
+  std_msgs
+  px4_msgs
+  offboard_state_machine
+)
+
+add_executable(swarm_coordinator_node
+  src/swarm_coordinator_node.cpp
+  src/swarm_coordinator_main.cpp
+)
+
+ament_target_dependencies(swarm_coordinator_node
+  rclcpp
+  std_msgs
+)
+
+add_executable(swarm_goto_coordinator_node
+  src/swarm_goto_coordinator_node.cpp
+  src/swarm_goto_coordinator_main.cpp
+)
+
+ament_target_dependencies(swarm_goto_coordinator_node
+  rclcpp
+  std_msgs
+  px4_msgs
+)
+
 install(DIRECTORY include/
   DESTINATION include
 )
@@ -35,6 +68,9 @@ install(DIRECTORY include/
 # Install targets
 install(TARGETS
   traj_test_node
+  follow_traj_node
+  swarm_coordinator_node
+  swarm_goto_coordinator_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

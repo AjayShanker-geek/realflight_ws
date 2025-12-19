@@ -220,7 +220,8 @@ OffboardFSM::OffboardFSM(int drone_id)
       std::bind(&OffboardFSM::status_cb, this, std::placeholders::_1));
 
   sub_state_cmd_ = create_subscription<std_msgs::msg::Int32>(
-      "/state/command_drone_" + std::to_string(drone_id_), rclcpp::QoS{10},
+      "/state/command_drone_" + std::to_string(drone_id_), 
+      rclcpp::QoS{10}.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE),
       std::bind(&OffboardFSM::state_cmd_cb, this, std::placeholders::_1));
 
   sub_odom_ = create_subscription<VehicleOdometry>(
@@ -828,8 +829,8 @@ void OffboardFSM::publish_offboard_mode()
   
   if (current_state_ == FsmState::TRAJ) {
     m.position     = true;
-    m.velocity     = false;
-    m.acceleration = false;
+    m.velocity     = true;
+    m.acceleration = true;
     m.attitude     = false;
     m.body_rate    = false;
   } else if (has_active_seg) {
