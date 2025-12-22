@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.widgets import Slider
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 
@@ -46,6 +47,16 @@ def load_xyz(csv_path: Path) -> Dict[str, np.ndarray]:
     }
 
 
+def prepare_trajectory(traj: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """Sort trajectory by time to keep interpolation stable."""
+    if traj["time"].size == 0:
+        raise ValueError("Trajectory contains no samples.")
+    order = np.argsort(traj["time"])
+    if not np.all(order == np.arange(traj["time"].size)):
+        traj = {key: traj[key][order] for key in traj}
+    return traj
+
+
 def set_equal_aspect_3d(ax, xs: List[np.ndarray], ys: List[np.ndarray], zs: List[np.ndarray]):
     """Force 3D axes to share the same scale."""
     all_x = np.concatenate(xs)
@@ -68,15 +79,53 @@ def plot_trajectories(
     trajectories: List[Tuple[int, Dict[str, np.ndarray]]],
     title_suffix: str,
 ):
-    """Plot 3D and XY projections for all drones."""
-    fig3d = plt.figure(figsize=(8, 6))
-    ax3d = fig3d.add_subplot(111, projection="3d")
+    """Plot 3D and XY projections for all drones with an interactive time slider."""
+    fig = plt.figure(figsize=(12, 6))
+    fig.subplots_adjust(bottom=0.18, wspace=0.25)
+    ax3d = fig.add_subplot(1, 2, 1, projection="3d")
+    ax_xy = fig.add_subplot(1, 2, 2)
+
     xs, ys, zs = [], [], []
-    for drone_id, traj in trajectories:
-        ax3d.plot(traj["x"], traj["y"], traj["z"], label=f"drone {drone_id}")
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(trajectories), 1)))
+    marker_entries = []
+    for (drone_id, traj), color in zip(trajectories, colors):
+        ax3d.plot(traj["x"], traj["y"], traj["z"], label=f"drone {drone_id}", color=color)
+        ax_xy.plot(traj["x"], traj["y"], label=f"drone {drone_id}", color=color)
         xs.append(traj["x"])
         ys.append(traj["y"])
         zs.append(traj["z"])
+
+        dot3d, = ax3d.plot(
+            [np.nan],
+            [np.nan],
+            [np.nan],
+            marker="o",
+            markersize=25,
+            linestyle="None",
+            color=color,
+        )
+        dot2d, = ax_xy.plot(
+            [np.nan],
+            [np.nan],
+            marker="o",
+            markersize=25,
+            linestyle="None",
+            color=color,
+        )
+
+        marker_entries.append(
+            {
+                "time": traj["time"],
+                "x": traj["x"],
+                "y": traj["y"],
+                "z": traj["z"],
+                "t_min": traj["time"][0],
+                "t_max": traj["time"][-1],
+                "dot3d": dot3d,
+                "dot2d": dot2d,
+            }
+        )
+
     ax3d.set_title(f"3D Trajectories ({title_suffix})")
     ax3d.set_xlabel("X [m]")
     ax3d.set_ylabel("Y [m]")
@@ -85,11 +134,6 @@ def plot_trajectories(
     ax3d.legend()
     ax3d.grid(True)
 
-    fig_xy, ax_xy = plt.subplots(figsize=(8, 6))
-    for drone_id, traj in trajectories:
-        ax_xy.plot(traj["x"], traj["y"], label=f"drone {drone_id}")
-        ax_xy.plot(traj["x"][0], traj["y"][0], "o", markersize=4, label=f"start {drone_id}")
-        ax_xy.plot(traj["x"][-1], traj["y"][-1], "x", markersize=6, label=f"end {drone_id}")
     ax_xy.set_title(f"XY Projection ({title_suffix})")
     ax_xy.set_xlabel("X [m]")
     ax_xy.set_ylabel("Y [m]")
@@ -97,13 +141,44 @@ def plot_trajectories(
     ax_xy.legend(ncol=2, fontsize="small")
     ax_xy.grid(True)
 
-    plt.tight_layout()
+    all_times = np.concatenate([traj["time"] for _, traj in trajectories])
+    t_min = float(np.min(all_times))
+    t_max = float(np.max(all_times))
+
+    ax_slider = fig.add_axes([0.15, 0.08, 0.7, 0.03])
+    slider = Slider(
+        ax=ax_slider,
+        label="time [s]",
+        valmin=t_min,
+        valmax=t_max,
+        valinit=t_min,
+        valfmt="%.2f",
+    )
+    time_text = fig.text(0.5, 0.02, f"t = {t_min:.2f} s", ha="center", va="center")
+
+    def update_time(val):
+        t = slider.val
+        for entry in marker_entries:
+            if t < entry["t_min"] or t > entry["t_max"]:
+                x = y = z = np.nan
+            else:
+                x = float(np.interp(t, entry["time"], entry["x"]))
+                y = float(np.interp(t, entry["time"], entry["y"]))
+                z = float(np.interp(t, entry["time"], entry["z"]))
+            entry["dot3d"].set_data_3d([x], [y], [z])
+            entry["dot2d"].set_data([x], [y])
+        time_text.set_text(f"t = {t:.2f} s")
+        fig.canvas.draw_idle()
+
+    slider.on_changed(update_time)
+    update_time(t_min)
+
     plt.show(block=True)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Plot trajectories for all drones (3D with equal scale and XY projection)."
+        description="Plot trajectories for all drones (3D + XY views with a time slider)."
     )
     parser.add_argument(
         "--base-dir",
@@ -125,7 +200,7 @@ def main():
 
     trajectories: List[Tuple[int, Dict[str, np.ndarray]]] = []
     for drone_id, csv_path in traj_files:
-        traj = load_xyz(csv_path)
+        traj = prepare_trajectory(load_xyz(csv_path))
         trajectories.append((drone_id, traj))
         print(f"Loaded drone {drone_id} from {csv_path}")
 

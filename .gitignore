@@ -15,3 +15,6 @@ __pycache__/
 
 # cached data
 .DS_Store
+
+# data convert
+raw_data/
