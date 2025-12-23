@@ -3,12 +3,94 @@
 
 import math
 from pathlib import Path
+import re
+from typing import Optional
 
 import numpy as np
 from casadi import SX, Function, jacobian, mtimes, vertcat, horzcat
 
 # Repository root
 BASE_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG_PATH = BASE_DIR / "tools" / "preprocess_traj_new.yaml"
+
+
+def _read_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    config = {}
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.match(r"^([A-Za-z0-9_]+)\s*:\s*(.+)$", line)
+        if match:
+            key = match.group(1)
+            value = match.group(2).strip().strip("\"'")
+            config[key] = value
+    return config
+
+
+def _parse_float(config: dict, key: str) -> Optional[float]:
+    value = config.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_rg(config: dict) -> Optional[np.ndarray]:
+    value = config.get("rg")
+    if value is None:
+        return None
+    match = re.match(r"^\[([^\]]+)\]$", value)
+    if not match:
+        return None
+    parts = [p.strip() for p in match.group(1).split(",")]
+    if len(parts) < 2:
+        return None
+    try:
+        rg_x = float(parts[0])
+        rg_y = float(parts[1])
+        rg_z = float(parts[2]) if len(parts) > 2 else 0.0
+    except ValueError:
+        return None
+    return np.array([rg_x, rg_y, rg_z])
+
+
+def resolve_default_scenario_dir(base_dir: Path) -> Path:
+    raw_root = base_dir / "raw_data"
+    candidates = sorted(raw_root.glob("Planning_plots_multiagent_meta_evaluation_COM_Dyn_H*"))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No COM_Dyn_H scenario directories found under {raw_root}"
+        )
+    for cand in candidates:
+        if "rg=[0,-0.03]" in cand.name:
+            return cand
+    return candidates[0]
+
+
+def resolve_scenario_dir(
+    base_dir: Optional[Path] = None,
+    config_path: Optional[Path] = None,
+    repo_root: Path = BASE_DIR,
+) -> Path:
+    if base_dir is not None:
+        scenario_dir = Path(base_dir)
+        if not scenario_dir.is_absolute():
+            scenario_dir = repo_root / scenario_dir
+        return scenario_dir
+    config_path = config_path or DEFAULT_CONFIG_PATH
+    config = _read_config(config_path)
+    config_base = config.get("base_dir")
+    if config_base:
+        scenario_dir = Path(config_base)
+        if not scenario_dir.is_absolute():
+            scenario_dir = repo_root / scenario_dir
+        return scenario_dir
+    return resolve_default_scenario_dir(repo_root)
 
 
 class DataLoader:
@@ -19,7 +101,7 @@ class DataLoader:
     - Control inputs and feedback gains are provided as zeros for compatibility.
     """
 
-    def __init__(self):
+    def __init__(self, base_dir: Optional[Path] = None):
         self.num_drones = 3
         self.dt = 0.05  # 20 Hz
         self.traj_duration = 6.0
@@ -29,13 +111,32 @@ class DataLoader:
         self.alpha = 2 * math.pi / self.num_drones
         self.cable_length = 1.0
         self.g = 9.81
-        self.ml = 0.45  # m1 + m2 from setting.txt
+        self.ml = 0.45  # m1 + m2
         self.ez = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
-        self.rg = np.zeros(3)  # no offset saved
+        self.rg = np.zeros(3)
 
         # Paths
-        self.path = BASE_DIR/ "raw_data" / "3quad_traj" / "Planning_plots_multiagent_meta_evaluation_COM_Dyn_H (nq=3,m2=0.1,rp=[0,0.07])"
+        self.path = resolve_scenario_dir(base_dir, repo_root=BASE_DIR)
+        if not self.path.exists():
+            raise FileNotFoundError(f"Scenario directory not found: {self.path}")
         reference_dir = self.path / "Reference_traj_6_S_shape_evaluation"
+
+        config = _read_config(DEFAULT_CONFIG_PATH)
+        dt_val = _parse_float(config, "dt")
+        if dt_val is not None:
+            self.dt = dt_val
+        rl_val = _parse_float(config, "rl")
+        if rl_val is not None:
+            self.rl = rl_val
+        cl_val = _parse_float(config, "cl0")
+        if cl_val is not None:
+            self.cable_length = cl_val
+        ml_val = _parse_float(config, "ml")
+        if ml_val is not None:
+            self.ml = ml_val
+        rg_val = _parse_rg(config)
+        if rg_val is not None:
+            self.rg = rg_val
 
         # Reference trajectory coefficients (S-shape, 4 segments)
         self.Coeffx = np.zeros((4, 8))

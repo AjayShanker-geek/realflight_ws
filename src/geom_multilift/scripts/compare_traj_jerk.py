@@ -5,6 +5,7 @@ Compare jerk levels between 20 Hz data and 100 Hz preprocessed CSV output.
 
 import argparse
 import csv
+import re
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,22 +19,30 @@ else:
     _PLOT_IMPORT_ERROR = None
 
 
-def parse_dt(setting_path: Path):
-    if not setting_path.exists():
+def read_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    config = {}
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.match(r"^([A-Za-z0-9_]+)\s*:\s*(.+)$", line)
+        if match:
+            key = match.group(1)
+            value = match.group(2).strip().strip("\"'")
+            config[key] = value
+    return config
+
+
+def parse_config_float(config: dict, key: str) -> Optional[float]:
+    value = config.get(key)
+    if value is None:
         return None
-    dt = None
-    with setting_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.split("#", 1)[0].strip()
-            if line.startswith("dt"):
-                parts = line.split("=", 1)
-                if len(parts) == 2:
-                    try:
-                        dt = float(parts[1].strip())
-                    except ValueError:
-                        dt = None
-                break
-    return dt
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def resolve_payload_path(path: Path) -> Path:
@@ -85,8 +94,7 @@ def load_payload_raw(
     payload_path = find_payload_npy(raw_dir, payload_override)
     xl = np.load(payload_path, allow_pickle=True)
     pos = xl[:, 0:3]
-    dt = parse_dt(raw_dir / "setting.txt") or raw_dt
-    time = np.arange(pos.shape[0]) * dt
+    time = np.arange(pos.shape[0]) * raw_dt
     return time, pos
 
 
@@ -119,16 +127,23 @@ def print_stats(label: str, stats: dict) -> None:
 
 
 def main() -> None:
-    default_raw = Path(
-        "raw_data/3quad_traj/Planning_plots_multiagent_meta_evaluation_COM_Dyn_V(m2=0.1,rg=[0.022,0.016])"
+    repo_root = Path(__file__).resolve().parents[3]
+    config_path = repo_root / "tools" / "preprocess_traj_new.yaml"
+    config = read_config(config_path)
+    config_base = config.get("base_dir")
+    default_raw = (
+        (repo_root / config_base) if config_base else Path(
+            "raw_data/3quad_traj/Planning_plots_multiagent_meta_evaluation_COM_Dyn_V(m2=0.1,rg=[0.022,0.016])"
+        )
     )
     default_100hz = Path("data/preprocessed/rg_0022_0016_3quad_vertical_100hz/payload.csv")
+    default_raw_dt = parse_config_float(config, "dt") or 0.05
 
     parser = argparse.ArgumentParser(description="Compare 20 Hz vs 100 Hz jerk levels")
     parser.add_argument("--raw-dir", type=Path, default=default_raw,
                         help="Raw scenario directory (20 Hz)")
-    parser.add_argument("--raw-dt", type=float, default=0.05,
-                        help="Raw dt used when setting.txt is missing")
+    parser.add_argument("--raw-dt", type=float, default=default_raw_dt,
+                        help="Raw dt used to build the 20 Hz time base")
     parser.add_argument("--raw-payload", type=Path, default=None,
                         help="Override payload .npy path")
     parser.add_argument("--csv-100hz", type=Path, default=default_100hz,

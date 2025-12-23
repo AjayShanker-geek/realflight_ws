@@ -1,0 +1,6 @@
+base_dir: "raw_data/Planning_plots_multiagent_meta_evaluation_COM_Dyn_H (m2=0.1,rg=[0,-0.03])"
+dt: 0.05
+rl: 0.13
+cl0: 1.0
+ml: 0.25
+rg: [0.0, -0.03, 0.0]
