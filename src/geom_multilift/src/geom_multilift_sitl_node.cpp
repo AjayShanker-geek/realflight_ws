@@ -374,7 +374,7 @@ void GeomMultiliftSitlNode::odom_cb(const px4_msgs::msg::VehicleOdometry::Shared
 }
 
 void GeomMultiliftSitlNode::local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
-  // Use linear acceleration from estimator for cable dynamics compensation.
+  // Use linear velocity/accel from estimator for cable dynamics compensation.
   drone_vel_ = Eigen::Vector3d(msg->vx, msg->vy, msg->vz);
   drone_acc_sp_ = Eigen::Vector3d(msg->ax, msg->ay, msg->az);
 }

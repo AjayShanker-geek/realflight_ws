@@ -11,7 +11,7 @@
 // Mirrors the Python controller used in px4_offboard/geom_multilift.py:
 // - payload pose from /payload_odom (Odometry, ENU -> NED conversion)
 // - drone pose from /simulation/position_drone_<i>
-// - velocities/omegas from PX4 odom/local_position topics
+// - attitude/bodyrate from PX4 odom, linear velocity/accel from PX4 local_position
 class GeomMultiliftSitlNode : public rclcpp::Node {
 public:
   GeomMultiliftSitlNode(int drone_id, int total_drones);

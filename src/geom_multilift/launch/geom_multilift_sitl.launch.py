@@ -4,7 +4,7 @@ Launch per-drone geometric multilift controller for SITL.
 This mirrors px4_offboard/geom_multilift.py inputs:
  - payload odometry on /payload_odom (Odometry, ENU)
  - simulation drone pose on /simulation/position_drone_<i>
- - PX4 odom/local position for angular/linear rates
+ - attitude/bodyrate from PX4 odom, linear velocity/accel from PX4 local_position
 """
 
 import os

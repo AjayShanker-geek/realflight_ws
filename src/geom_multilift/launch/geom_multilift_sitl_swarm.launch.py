@@ -4,13 +4,11 @@ Launch all SITL geometric multilift nodes in one shot.
 Spins one node per drone_id in [0, total_drones-1] using the SITL inputs:
  - /payload_odom
  - /simulation/position_drone_<i+1>
- - PX4 odom/local_position topics per drone namespace
+ - attitude/bodyrate from PX4 odom, linear velocity/accel from PX4 local_position
+Also launches the sync_goto state machine and a single swarm coordinator.
 """
 
-import csv
 import os
-import sys
-from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, LogInfo
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -18,49 +16,51 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
-def read_first_trajectory_point(base_dir: str, drone_id: int):
-  csv_path = Path(base_dir) / f"drone_{drone_id}_traj_smoothed_100hz.csv"
-  if not csv_path.exists():
-    print(f"ERROR: Trajectory file not found: {csv_path}", file=sys.stderr)
-    raise FileNotFoundError(f"Trajectory file not found: {csv_path}")
-
-  with csv_path.open("r") as csvfile:
-    csv_reader = csv.reader(csvfile)
-    try:
-      _ = next(csv_reader)
-    except StopIteration:
-      raise ValueError(f"Trajectory file is empty: {csv_path}")
-    try:
-      first_row = next(csv_reader)
-    except StopIteration:
-      raise ValueError(f"Trajectory file has no data rows: {csv_path}")
-
-  x = float(first_row[1])
-  y = float(first_row[2])
-  z = float(first_row[3])
-  return x, y, z
-
-
 def make_nodes(context):
   total = int(LaunchConfiguration("total_drones").perform(context))
+  drone_ids_raw = LaunchConfiguration("drone_ids").perform(context).strip()
   params_file = LaunchConfiguration("params_file")
   traj_base_dir = LaunchConfiguration("traj_base_dir").perform(context)
   log_dir = LaunchConfiguration("log_dir").perform(context)
-  launch_fsm = LaunchConfiguration("launch_fsm").perform(context).lower() in ("1", "true", "yes")
+  launch_sync_goto = LaunchConfiguration("launch_sync_goto").perform(context).lower() in ("1", "true", "yes")
+  launch_coordinator = LaunchConfiguration("launch_coordinator").perform(context).lower() in ("1", "true", "yes")
+  use_raw_traj = LaunchConfiguration("use_raw_traj").perform(context).lower() in ("1", "true", "yes")
   takeoff_time = float(LaunchConfiguration("takeoff_time").perform(context))
-  climb_rate = float(LaunchConfiguration("climb_rate").perform(context))
-  landing_time = float(LaunchConfiguration("landing_time").perform(context))
-  goto_tol = float(LaunchConfiguration("goto_tol").perform(context))
-  goto_max_vel = float(LaunchConfiguration("goto_max_vel").perform(context))
-  goto_accel_time = float(LaunchConfiguration("goto_accel_time").perform(context))
-  fsm_timer_period = float(LaunchConfiguration("fsm_timer_period").perform(context))
+  goto_time = float(LaunchConfiguration("goto_time").perform(context))
+  sync_timer_period = float(LaunchConfiguration("sync_timer_period").perform(context))
+  takeoff_alt = float(LaunchConfiguration("takeoff_alt").perform(context))
   alt_tol = float(LaunchConfiguration("alt_tol").perform(context))
-  inward_offset = float(LaunchConfiguration("inward_offset").perform(context))
+  hover_wait_time = float(LaunchConfiguration("hover_wait_time").perform(context))
+
+  if drone_ids_raw:
+    drone_ids = [int(x.strip()) for x in drone_ids_raw.split(",") if x.strip()]
+  else:
+    drone_ids = list(range(total))
+  if len(drone_ids) != total:
+    raise ValueError(f"Mismatch: drone_ids has {len(drone_ids)} IDs but total_drones={total}")
 
   nodes = [
-    LogInfo(msg=f"Starting SITL geom_multilift swarm with {total} drones (launch_fsm={launch_fsm})")
+    LogInfo(msg=f"Starting SITL geom_multilift swarm with {total} drones (sync_goto={launch_sync_goto})")
   ]
-  for drone_id in range(total):
+
+  if launch_coordinator:
+    nodes.append(
+      Node(
+        package="traj_test",
+        executable="swarm_goto_coordinator_node",
+        name="swarm_goto_coordinator",
+        output="screen",
+        parameters=[{
+          "total_drones": total,
+          "drone_ids": drone_ids,
+          "takeoff_alt": takeoff_alt,
+          "alt_tol": alt_tol,
+          "hover_wait_time": hover_wait_time,
+        }],
+      )
+    )
+
+  for drone_id in drone_ids:
     log_path = ""
     if log_dir:
       log_path = os.path.join(log_dir, f"geom_multilift_sitl_drone_{drone_id}.csv")
@@ -77,33 +77,21 @@ def make_nodes(context):
         parameters=params,
       )
     )
-    if launch_fsm:
-      goto_x, goto_y, goto_z = read_first_trajectory_point(traj_base_dir, drone_id)
-      takeoff_altitude = abs(goto_z)
+    if launch_sync_goto:
       nodes.append(
         Node(
           package="offboard_state_machine",
-          executable="offboard_fsm_node",
-          name=f"offboard_fsm_node_{drone_id}",
+          executable="offboard_sync_goto_node",
+          name=f"offboard_sync_goto_{drone_id}",
           output="screen",
           parameters=[{
             "drone_id": drone_id,
-            "takeoff_alt": takeoff_altitude,
+            "takeoff_alt": takeoff_alt,
             "takeoff_time": takeoff_time,
-            "climb_rate": climb_rate,
-            "landing_time": landing_time,
-            "goto_x": goto_x,
-            "goto_y": goto_y,
-            "goto_z": goto_z,
-            "goto_tol": goto_tol,
-            "goto_max_vel": goto_max_vel,
-            "goto_accel_time": goto_accel_time,
-            "inward_offset": inward_offset,
-            "payload_offset_x": goto_x,
-            "payload_offset_y": goto_y,
-            "num_drones": total,
-            "timer_period": fsm_timer_period,
-            "alt_tol": alt_tol,
+            "goto_time": goto_time,
+            "traj_base_dir": traj_base_dir,
+            "use_raw_traj": use_raw_traj,
+            "timer_period": sync_timer_period,
           }],
         )
       )
@@ -122,31 +110,31 @@ def generate_launch_description():
   return LaunchDescription([
     DeclareLaunchArgument("total_drones", default_value=default_total,
                           description="Total number of drones to launch"),
+    DeclareLaunchArgument("drone_ids", default_value="",
+                          description="Comma-separated drone IDs (default 0..total-1)"),
     DeclareLaunchArgument("params_file", default_value=default_params,
                           description="YAML file with geom_multilift SITL parameters"),
     DeclareLaunchArgument("traj_base_dir", default_value=default_traj,
                           description="Directory containing per-drone trajectory CSVs"),
+    DeclareLaunchArgument("use_raw_traj", default_value="false",
+                          description="Use *_traj_raw_20hz.csv instead of smoothed CSVs"),
     DeclareLaunchArgument("log_dir", default_value="",
                           description="Optional directory for per-drone CSV logs"),
-    DeclareLaunchArgument("launch_fsm", default_value="true",
-                          description="Launch offboard FSM nodes per drone"),
+    DeclareLaunchArgument("launch_sync_goto", default_value="true",
+                          description="Launch sync_goto state machine per drone"),
+    DeclareLaunchArgument("launch_coordinator", default_value="true",
+                          description="Launch a single swarm_goto_coordinator_node"),
+    DeclareLaunchArgument("takeoff_alt", default_value="0.4",
+                          description="Takeoff altitude for sync_goto/coordinator (m, positive up)"),
     DeclareLaunchArgument("takeoff_time", default_value="10.0",
-                          description="FSM takeoff time (s)"),
-    DeclareLaunchArgument("climb_rate", default_value="1.0",
-                          description="FSM climb rate (m/s)"),
-    DeclareLaunchArgument("landing_time", default_value="2.0",
-                          description="FSM landing time (s)"),
-    DeclareLaunchArgument("goto_tol", default_value="0.05",
-                          description="FSM goto tolerance (m)"),
-    DeclareLaunchArgument("goto_max_vel", default_value="1.0",
-                          description="FSM goto max velocity (m/s)"),
-    DeclareLaunchArgument("goto_accel_time", default_value="4.0",
-                          description="FSM goto accel time (s)"),
-    DeclareLaunchArgument("fsm_timer_period", default_value="0.02",
-                          description="FSM timer period (s)"),
+                          description="sync_goto takeoff time (s)"),
+    DeclareLaunchArgument("goto_time", default_value="10.0",
+                          description="sync_goto goto time (s)"),
+    DeclareLaunchArgument("sync_timer_period", default_value="0.02",
+                          description="sync_goto timer period (s)"),
     DeclareLaunchArgument("alt_tol", default_value="0.01",
-                          description="FSM altitude tolerance (m)"),
-    DeclareLaunchArgument("inward_offset", default_value="0.0",
-                          description="FSM inward offset (m)"),
+                          description="Coordinator altitude tolerance (m)"),
+    DeclareLaunchArgument("hover_wait_time", default_value="5.0",
+                          description="Coordinator hover wait before TRAJ (s)"),
     OpaqueFunction(function=make_nodes),
   ])

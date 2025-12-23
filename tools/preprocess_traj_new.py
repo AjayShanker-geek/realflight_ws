@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Convert the new COM_Dyn_H trajectory to CSV for:
-- Per-drone follow trajectories (NED, raw 20 Hz + smoothed 100 Hz).
+- Per-drone follow trajectories (NED, smoothed 100 Hz).
 - Geometric controller data (payload/cable/Kfb in ENU at 100 Hz).
 
 Column naming follows tools/save_traj_new.py.
@@ -18,18 +18,19 @@ import numpy as np
 FILE_DIR = Path(__file__).resolve().parent
 sys.path.append(str(FILE_DIR))
 
-from get_data_new import DataLoader
+from get_data_new import DataLoader, resolve_scenario_dir
 
 
 class TrajectoryConverterNew:
     def __init__(
         self,
         output_dir: Path,
+        base_dir: Optional[Path] = None,
         target_dt: float = 0.01,
         window: int = 8,
         order: int = 7,
     ) -> None:
-        self.loader = DataLoader()
+        self.loader = DataLoader(base_dir)
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -137,41 +138,272 @@ class TrajectoryConverterNew:
 
         return pos_out, vel_out, acc_out, jerk_out, snap_out
 
-    @staticmethod
-    def resample_vector_linear(
-        series_raw: np.ndarray, time_raw: np.ndarray, time_dense: np.ndarray
+    def resample_polynomial_series(
+        self,
+        series_raw: np.ndarray,
+        time_raw: np.ndarray,
+        time_dense: np.ndarray,
     ) -> np.ndarray:
-        num_tracks = series_raw.shape[0]
+        num_tracks, _, dims = series_raw.shape
+        out = np.zeros((num_tracks, len(time_dense), dims))
+        half_w = self.window // 2
+
+        for i in range(num_tracks):
+            for axis in range(dims):
+                values = series_raw[i, :, axis]
+                for idx_t, t in enumerate(time_dense):
+                    close_mask = np.isclose(time_raw, t)
+                    if np.any(close_mask):
+                        raw_idx = int(np.argmax(close_mask))
+                        is_raw = True
+                    else:
+                        raw_idx = int(np.searchsorted(time_raw, t))
+                        is_raw = False
+                        if raw_idx >= len(time_raw):
+                            raw_idx = len(time_raw) - 1
+                    center = raw_idx
+                    start = max(0, center - half_w)
+                    end = min(len(time_raw), start + self.window)
+                    start = max(0, end - self.window)
+                    t_win = time_raw[start:end]
+                    v_win = values[start:end]
+                    order_fit = min(self.order, len(t_win) - 1)
+                    if order_fit < 1:
+                        out[i, idx_t, axis] = values[center]
+                        continue
+                    t_shift = t_win - t
+                    coeffs = np.polyfit(t_shift, v_win, order_fit)
+                    val = np.polyval(coeffs, 0.0)
+                    if is_raw:
+                        val = values[raw_idx]
+                    out[i, idx_t, axis] = val
+
+        return out
+
+    @staticmethod
+    def quat_normalize(q: np.ndarray) -> np.ndarray:
+        norm = np.linalg.norm(q)
+        if norm < 1e-9:
+            return np.array([1.0, 0.0, 0.0, 0.0])
+        return q / norm
+
+    @staticmethod
+    def quat_conjugate(q: np.ndarray) -> np.ndarray:
+        return np.array([q[0], -q[1], -q[2], -q[3]])
+
+    @staticmethod
+    def quat_multiply(q: np.ndarray, r: np.ndarray) -> np.ndarray:
+        w1, x1, y1, z1 = q
+        w2, x2, y2, z2 = r
+        return np.array([
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        ])
+
+    def quat_inverse(self, q: np.ndarray) -> np.ndarray:
+        q = self.quat_normalize(q)
+        return self.quat_conjugate(q)
+
+    @staticmethod
+    def quat_log(q: np.ndarray) -> np.ndarray:
+        w = np.clip(q[0], -1.0, 1.0)
+        v = q[1:]
+        v_norm = np.linalg.norm(v)
+        if v_norm < 1e-9:
+            return np.zeros(4)
+        angle = np.arctan2(v_norm, w)
+        return np.array([0.0, *(v / v_norm * angle)])
+
+    @staticmethod
+    def quat_exp(q: np.ndarray) -> np.ndarray:
+        v = q[1:]
+        angle = np.linalg.norm(v)
+        if angle < 1e-9:
+            return np.array([1.0, 0.0, 0.0, 0.0])
+        return np.array([np.cos(angle), *(v / angle * np.sin(angle))])
+
+    def quat_slerp(self, q0: np.ndarray, q1: np.ndarray, t: float) -> np.ndarray:
+        q0 = self.quat_normalize(q0)
+        q1 = self.quat_normalize(q1)
+        dot = float(np.dot(q0, q1))
+        if dot < 0.0:
+            q1 = -q1
+            dot = -dot
+        if dot > 0.9995:
+            return self.quat_normalize(q0 + t * (q1 - q0))
+        theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+        sin_theta_0 = np.sin(theta_0)
+        theta = theta_0 * t
+        s0 = np.sin(theta_0 - theta) / sin_theta_0
+        s1 = np.sin(theta) / sin_theta_0
+        return s0 * q0 + s1 * q1
+
+    def quat_squad(
+        self, q0: np.ndarray, q1: np.ndarray, a0: np.ndarray, a1: np.ndarray, t: float
+    ) -> np.ndarray:
+        slerp_q = self.quat_slerp(q0, q1, t)
+        slerp_a = self.quat_slerp(a0, a1, t)
+        return self.quat_slerp(slerp_q, slerp_a, 2.0 * t * (1.0 - t))
+
+    @staticmethod
+    def slerp_vectors(v0: np.ndarray, v1: np.ndarray, t: float) -> np.ndarray:
+        v0_norm = np.linalg.norm(v0)
+        v1_norm = np.linalg.norm(v1)
+        if v0_norm < 1e-9 or v1_norm < 1e-9:
+            return v0
+        v0_u = v0 / v0_norm
+        v1_u = v1 / v1_norm
+        dot = float(np.clip(np.dot(v0_u, v1_u), -1.0, 1.0))
+        if dot > 0.9995:
+            v = v0_u + t * (v1_u - v0_u)
+            return v / np.clip(np.linalg.norm(v), 1e-9, None)
+        if dot < -0.9995:
+            axis = np.array([1.0, 0.0, 0.0]) if abs(v0_u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            ortho = np.cross(v0_u, axis)
+            ortho /= np.clip(np.linalg.norm(ortho), 1e-9, None)
+            return np.cos(np.pi * t) * v0_u + np.sin(np.pi * t) * ortho
+        theta = np.arccos(dot)
+        sin_theta = np.sin(theta)
+        return (
+            np.sin((1.0 - t) * theta) / sin_theta * v0_u
+            + np.sin(t * theta) / sin_theta * v1_u
+        )
+
+    @staticmethod
+    def sphere_log(base: np.ndarray, target: np.ndarray) -> np.ndarray:
+        base_u = base / np.clip(np.linalg.norm(base), 1e-9, None)
+        tgt_u = target / np.clip(np.linalg.norm(target), 1e-9, None)
+        dot = float(np.clip(np.dot(base_u, tgt_u), -1.0, 1.0))
+        if dot > 0.999999:
+            return np.zeros(3)
+        if dot < -0.999999:
+            axis = np.array([1.0, 0.0, 0.0]) if abs(base_u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            ortho = np.cross(base_u, axis)
+            ortho /= np.clip(np.linalg.norm(ortho), 1e-9, None)
+            return ortho * np.pi
+        v = tgt_u - dot * base_u
+        v_norm = np.linalg.norm(v)
+        if v_norm < 1e-9:
+            return np.zeros(3)
+        theta = np.arccos(dot)
+        return v * (theta / v_norm)
+
+    @staticmethod
+    def sphere_exp(base: np.ndarray, tangent: np.ndarray) -> np.ndarray:
+        base_u = base / np.clip(np.linalg.norm(base), 1e-9, None)
+        theta = np.linalg.norm(tangent)
+        if theta < 1e-9:
+            return base_u
+        direction = tangent / theta
+        return np.cos(theta) * base_u + np.sin(theta) * direction
+
+    def sphere_squad(
+        self,
+        v0: np.ndarray,
+        v1: np.ndarray,
+        a0: np.ndarray,
+        a1: np.ndarray,
+        t: float,
+    ) -> np.ndarray:
+        slerp_v = self.slerp_vectors(v0, v1, t)
+        slerp_a = self.slerp_vectors(a0, a1, t)
+        return self.slerp_vectors(slerp_v, slerp_a, 2.0 * t * (1.0 - t))
+
+    def resample_unit_vectors_squad(
+        self,
+        series_raw: np.ndarray,
+        time_raw: np.ndarray,
+        time_dense: np.ndarray,
+    ) -> np.ndarray:
+        series_norm = self.normalize_vectors(series_raw)
+        num_tracks = series_norm.shape[0]
         out = np.zeros((num_tracks, len(time_dense), 3))
-        for i in range(num_tracks):
-            for axis in range(3):
-                out[i, :, axis] = np.interp(time_dense, time_raw, series_raw[i, :, axis])
+        if series_norm.shape[1] == 1:
+            out[:] = series_norm[:, 0:1, :]
+            return out
+
+        ctrl = np.zeros_like(series_norm)
+        ctrl[:, 0] = series_norm[:, 0]
+        ctrl[:, -1] = series_norm[:, -1]
+        for i in range(1, series_norm.shape[1] - 1):
+            for n in range(num_tracks):
+                log_prev = self.sphere_log(series_norm[n, i], series_norm[n, i - 1])
+                log_next = self.sphere_log(series_norm[n, i], series_norm[n, i + 1])
+                ctrl[n, i] = self.sphere_exp(series_norm[n, i], -0.25 * (log_prev + log_next))
+
+        for n in range(num_tracks):
+            for idx_t, t in enumerate(time_dense):
+                if t <= time_raw[0]:
+                    out[n, idx_t] = series_norm[n, 0]
+                    continue
+                if t >= time_raw[-1]:
+                    out[n, idx_t] = series_norm[n, -1]
+                    continue
+                seg = np.searchsorted(time_raw, t) - 1
+                seg = max(0, min(seg, series_norm.shape[1] - 2))
+                t0 = time_raw[seg]
+                t1 = time_raw[seg + 1]
+                u = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+                out[n, idx_t] = self.sphere_squad(
+                    series_norm[n, seg],
+                    series_norm[n, seg + 1],
+                    ctrl[n, seg],
+                    ctrl[n, seg + 1],
+                    u,
+                )
         return out
 
-    @staticmethod
-    def resample_scalar_linear(
-        series_raw: np.ndarray, time_raw: np.ndarray, time_dense: np.ndarray
-    ) -> np.ndarray:
-        num_tracks = series_raw.shape[0]
-        out = np.zeros((num_tracks, len(time_dense)))
-        for i in range(num_tracks):
-            out[i, :] = np.interp(time_dense, time_raw, series_raw[i, :])
-        return out
-
-    @staticmethod
     def resample_quaternion(
-        q_raw: np.ndarray, time_raw: np.ndarray, time_dense: np.ndarray
+        self, q_raw: np.ndarray, time_raw: np.ndarray, time_dense: np.ndarray
     ) -> np.ndarray:
-        q_out = np.zeros((len(time_dense), 4))
         q_cont = q_raw.copy()
         for i in range(1, q_cont.shape[0]):
             if np.dot(q_cont[i - 1], q_cont[i]) < 0.0:
                 q_cont[i] *= -1.0
-        for k in range(4):
-            q_out[:, k] = np.interp(time_dense, time_raw, q_cont[:, k])
-        norms = np.linalg.norm(q_out, axis=1, keepdims=True)
-        q_out = q_out / np.clip(norms, 1e-9, None)
-        return q_out
+        q_cont = np.array([self.quat_normalize(q) for q in q_cont])
+        if q_cont.shape[0] == 1:
+            return np.repeat(q_cont, len(time_dense), axis=0)
+
+        ctrl = np.zeros_like(q_cont)
+        ctrl[0] = q_cont[0]
+        ctrl[-1] = q_cont[-1]
+        for i in range(1, q_cont.shape[0] - 1):
+            q_inv = self.quat_inverse(q_cont[i])
+            log1 = self.quat_log(self.quat_multiply(q_inv, q_cont[i - 1]))
+            log2 = self.quat_log(self.quat_multiply(q_inv, q_cont[i + 1]))
+            exp_term = self.quat_exp(-0.25 * (log1 + log2))
+            ctrl[i] = self.quat_multiply(q_cont[i], exp_term)
+
+        out = np.zeros((len(time_dense), 4))
+        for idx_t, t in enumerate(time_dense):
+            if t <= time_raw[0]:
+                out[idx_t] = q_cont[0]
+                continue
+            if t >= time_raw[-1]:
+                out[idx_t] = q_cont[-1]
+                continue
+            seg = np.searchsorted(time_raw, t) - 1
+            seg = max(0, min(seg, q_cont.shape[0] - 2))
+            t0 = time_raw[seg]
+            t1 = time_raw[seg + 1]
+            u = 0.0 if t1 <= t0 else (t - t0) / (t1 - t0)
+            out[idx_t] = self.quat_squad(q_cont[seg], q_cont[seg + 1], ctrl[seg], ctrl[seg + 1], u)
+        return out
+
+    @staticmethod
+    def extend_time_series(
+        time_raw: np.ndarray, series_raw: np.ndarray, target_time: float, time_axis: int = 0
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if time_raw[-1] >= target_time:
+            return time_raw, series_raw
+        pad_slice = [slice(None)] * series_raw.ndim
+        pad_slice[time_axis] = slice(-1, None)
+        series_pad = series_raw[tuple(pad_slice)]
+        series_ext = np.concatenate([series_raw, series_pad], axis=time_axis)
+        time_ext = np.append(time_raw, target_time)
+        return time_ext, series_ext
 
     def compute_attitude_and_body_rates(
         self, accel: np.ndarray, jerk: np.ndarray
@@ -365,26 +597,6 @@ class TrajectoryConverterNew:
 
         # Per-drone trajectories (NED)
         pos_raw_enu = self.compute_positions()
-        vel_raw_enu = self.compute_velocities(pos_raw_enu, self.dt)
-        acc_raw_enu = self.compute_accelerations(vel_raw_enu, self.dt)
-        jerk_raw_enu = np.gradient(acc_raw_enu, self.dt, axis=1)
-        snap_raw_enu = np.gradient(jerk_raw_enu, self.dt, axis=1)
-
-        pos_raw = self.enu_to_ned(pos_raw_enu)
-        vel_raw = self.enu_to_ned(vel_raw_enu)
-        acc_raw = self.enu_to_ned(acc_raw_enu)
-        jerk_raw = self.enu_to_ned(jerk_raw_enu)
-        snap_raw = self.enu_to_ned(snap_raw_enu)
-
-        self.save_drone_csv(
-            pos_raw,
-            vel_raw,
-            time_raw,
-            suffix="raw_20hz",
-            accel=acc_raw,
-            jerk=jerk_raw,
-            snap=snap_raw,
-        )
 
         (
             pos_smooth_enu,
@@ -436,11 +648,8 @@ class TrajectoryConverterNew:
         payload_snap_s = payload_snap_s[0]
 
         payload_q_s = self.resample_quaternion(self.loader.payload_q, time_raw, time_dense)
-        payload_w_s = np.column_stack([
-            np.interp(time_dense, time_raw, self.loader.payload_w[:, 0]),
-            np.interp(time_dense, time_raw, self.loader.payload_w[:, 1]),
-            np.interp(time_dense, time_raw, self.loader.payload_w[:, 2]),
-        ])
+        payload_w_raw = self.loader.payload_w.reshape(1, -1, 3)
+        payload_w_s = self.resample_polynomial_series(payload_w_raw, time_raw, time_dense)[0]
 
         self.save_payload_csv(
             time_dense,
@@ -455,20 +664,14 @@ class TrajectoryConverterNew:
 
         # Cable data (ENU)
         cable_dir_raw = self.loader.cable_direction
-        (
-            cable_dir_s,
-            _,
-            _,
-            _,
-            _,
-        ) = self.resample_polynomial(cable_dir_raw, time_raw, time_dense)
-        cable_dir_s = self.normalize_vectors(cable_dir_s)
+        cable_dir_s = self.resample_unit_vectors_squad(cable_dir_raw, time_raw, time_dense)
 
-        cable_omega_s = self.resample_vector_linear(self.loader.cable_omega, time_raw, time_dense)
-        cable_omega_dot_s = self.resample_vector_linear(
+        cable_omega_s = self.resample_polynomial_series(self.loader.cable_omega, time_raw, time_dense)
+        cable_omega_dot_s = self.resample_polynomial_series(
             self.loader.cable_omega_dot, time_raw, time_dense
         )
-        cable_mu_s = self.resample_scalar_linear(self.loader.cable_mu, time_raw, time_dense)
+        cable_mu_raw = self.loader.cable_mu[:, :, None]
+        cable_mu_s = self.resample_polynomial_series(cable_mu_raw, time_raw, time_dense)[:, :, 0]
 
         self.save_cable_csv(
             time_dense,
@@ -487,23 +690,38 @@ class TrajectoryConverterNew:
         if kfb_raw.ndim != 3 or kfb_raw.shape[1:] != (6, 13):
             raise ValueError(f"Unexpected Kfb shape: {kfb_raw.shape}")
         time_k = np.arange(kfb_raw.shape[0]) * self.dt
+        time_k, kfb_raw = self.extend_time_series(time_k, kfb_raw, time_dense_end, time_axis=0)
         kfb_flat = kfb_raw.reshape(kfb_raw.shape[0], -1)
-        kfb_interp = np.zeros((len(time_dense), kfb_flat.shape[1]))
-        for col in range(kfb_flat.shape[1]):
-            kfb_interp[:, col] = np.interp(time_dense, time_k, kfb_flat[:, col])
-        kfb_out = kfb_interp.reshape(len(time_dense), 6, 13)
+        kfb_series = kfb_flat[None, :, :]
+        kfb_resampled = self.resample_polynomial_series(kfb_series, time_k, time_dense)[0]
+        kfb_out = kfb_resampled.reshape(len(time_dense), 6, 13)
         self.save_kfb_csv(time_dense, kfb_out, self.output_dir / "kfb.csv")
 
         print(f"Wrote converted data to {self.output_dir}")
 
 
+def scenario_suffix(scenario_dir: Path) -> str:
+    marker = "COM_Dyn"
+    name = scenario_dir.name
+    if marker not in name:
+        return ""
+    suffix = name.split(marker, 1)[1]
+    return suffix
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert new trajectory to CSV")
     parser.add_argument(
+        "--base-dir",
+        type=Path,
+        default=None,
+        help="Raw-data scenario directory (defaults to base_dir in tools/preprocess_traj_new.yaml)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("data/realflight_traj_new"),
-        help="Output directory for CSV files",
+        default=None,
+        help="Output directory for CSV files (default: data/realflight_traj_new + scenario suffix)",
     )
     parser.add_argument(
         "--target-dt",
@@ -528,8 +746,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    scenario_dir = resolve_scenario_dir(args.base_dir, repo_root=Path(__file__).resolve().parents[1])
+    output_dir = args.output_dir
+    if output_dir is None:
+        base = Path("data/realflight_traj_new")
+        suffix = scenario_suffix(scenario_dir)
+        output_dir = base.parent / f"{base.name}{suffix}"
     converter = TrajectoryConverterNew(
-        args.output_dir,
+        output_dir,
+        base_dir=scenario_dir,
         target_dt=args.target_dt,
         window=args.window,
         order=args.order,

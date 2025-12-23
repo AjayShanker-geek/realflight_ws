@@ -7,7 +7,6 @@ Outputs 100 Hz trajectories using local high-order polynomial fits.
 
 from pathlib import Path
 import csv
-import re
 
 import numpy as np
 
@@ -15,20 +14,7 @@ import numpy as np
 TARGET_DT = 0.01
 WINDOW = 8
 ORDER = 7
-
-
-def parse_dt(setting_path: Path) -> float:
-    dt = None
-    with setting_path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.split("#", 1)[0].strip()
-            match = re.match(r"^dt\s*=\s*([0-9.]+)$", line)
-            if match:
-                dt = float(match.group(1))
-                break
-    if dt is None:
-        raise ValueError(f"Could not find dt in {setting_path}")
-    return dt
+DEFAULT_DT = 0.05
 
 
 def extend_time_series(time_raw: np.ndarray, series_raw: np.ndarray, target_time: float, time_axis: int = 0):
@@ -114,7 +100,7 @@ def main() -> None:
     out_dir = root / "data" / "preprocessed" / "rg_0022_0016_3quad_vertical_100hz"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    dt = parse_dt(scenario / "setting.txt")
+    dt = DEFAULT_DT
 
     xl = np.load(scenario / "xl_traj_0_3_a_3.npy", allow_pickle=True)  # (T,13)
     xq = np.load(scenario / "xq_traj_0_3_a_3.npy", allow_pickle=True)  # (N,T,14)
