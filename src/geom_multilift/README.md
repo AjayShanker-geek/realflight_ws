@@ -63,8 +63,8 @@ ros2 run geom_multilift realflight_traj_node 1 3 --ros-args \
 
 ## Topics and parameters (geom_multilift_node)
 - Subscribes: `payload_pose_topic` (default `/vrpn_mocap/multilift_payload/pose`), `/fmu/out/vehicle_odometry` (or `/px4_<id>/...`), `/state/state_drone_<id>`, `/fmu/out/vehicle_local_position_setpoint` (for accel fusion).
-- Publishes: `/fmu/in/vehicle_attitude_setpoint_v1`, `/fmu/in/trajectory_setpoint`, `/state/command_drone_<id>` (END_TRAJ).
-- Params: `data_root` (preprocessed directory), `timer_period`, `l` (cable length), gains `kq/kw/alpha_gain/z_weight/thrust_bias`.
+- Publishes: `/fmu/in/vehicle_attitude_setpoint`, `/fmu/in/trajectory_setpoint`, `/state/command_drone_<id>` (END_TRAJ).
+- Params: `data_root` (preprocessed directory), `timer_period`, `l` (cable length), `payload_mass`, `payload_radius`, `apply_payload_offset`, gains `kq/kw/alpha_gain/z_weight/thrust_bias`.
 
 ## Notes / assumptions
 - Preprocessed data lives under `data/preprocessed/rg_001_-001_3quad_l1m_100hz` (from the 3-quad set in `3quad_traj/...`). Adjust `data_root` to switch scenarios.
