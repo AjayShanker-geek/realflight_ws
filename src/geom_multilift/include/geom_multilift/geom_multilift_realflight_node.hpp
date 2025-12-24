@@ -87,6 +87,7 @@ private:
   double dt_nom_;
   double l_;           // cable length
   double payload_m_;
+  double payload_radius_;
   double m_drones_;
   double kq_;
   double kw_;
@@ -95,6 +96,7 @@ private:
   double thrust_bias_;
   double slowdown_;
   bool payload_enu_;
+  bool apply_payload_offset_;
 
   Eigen::Matrix3d T_enu2ned_;
   Eigen::Matrix3d T_body_;

@@ -75,6 +75,7 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
 , dt_nom_(0.01)
 , l_(1.0)
 , payload_m_(1.5)
+, payload_radius_(0.25)
 , m_drones_(0.25)
 , kq_(9.5)
 , kw_(3.4)
@@ -83,6 +84,7 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
 , thrust_bias_(0.0)
 , slowdown_(1.0)
 , payload_enu_(true)  // assume mocap publishes ENU PoseStamped
+, apply_payload_offset_(true)
 , acc_filter_(dt_nom_, 1e-5, 2e-5)
 , traj_started_(false)
 , traj_completed_(false)
@@ -94,6 +96,8 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
 {
   dt_nom_ = this->declare_parameter("timer_period", dt_nom_);
   l_ = this->declare_parameter("l", l_);
+  payload_m_ = this->declare_parameter("payload_mass", payload_m_);
+  payload_radius_ = this->declare_parameter("payload_radius", payload_radius_);
   kq_ = this->declare_parameter("kq", kq_);
   kw_ = this->declare_parameter("kw", kw_);
   z_weight_ = this->declare_parameter("z_weight", z_weight_);
@@ -106,6 +110,7 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   std::string payload_pose_topic = this->declare_parameter(
     "payload_pose_topic",
     std::string("/vrpn_mocap/multilift_payload/pose"));
+  apply_payload_offset_ = this->declare_parameter("apply_payload_offset", apply_payload_offset_);
 
   // build transforms
   T_enu2ned_ << 0, 1, 0,
@@ -117,8 +122,8 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   payload_enu_ = this->declare_parameter("payload_is_enu", payload_enu_);
 
   // geometry
-  double payload_r = 0.25;
-  double offset_r = l_ + payload_r;
+  double payload_r = payload_radius_;
+  double offset_r = apply_payload_offset_ ? (l_ + payload_r) : 0.0;
   for (int i = 0; i < total_drones_; ++i) {
     double angle = 2.0 * M_PI * i / static_cast<double>(total_drones_);
     double y = payload_r * std::cos(angle);
@@ -180,7 +185,7 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
     std::bind(&GeomMultiliftRealflightNode::odom_cb, this, _1));
 
   lps_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPositionSetpoint>(
-    px4_ns + "out/vehicle_local_position_setpoint", rclcpp::QoS(10),
+    px4_ns + "out/vehicle_local_position_setpoint", rclcpp::SensorDataQoS(),
     std::bind(&GeomMultiliftRealflightNode::lps_setpoint_cb, this, _1));
 
   state_sub_ = this->create_subscription<std_msgs::msg::Int32>(
@@ -198,7 +203,7 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   }
 
   att_pub_ = this->create_publisher<px4_msgs::msg::VehicleAttitudeSetpoint>(
-    px4_ns + "in/vehicle_attitude_setpoint_v1", rclcpp::QoS(10));
+    px4_ns + "in/vehicle_attitude_setpoint", rclcpp::QoS(10));
   traj_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
     px4_ns + "in/trajectory_setpoint", rclcpp::QoS(10));
   cmd_pub_ = this->create_publisher<std_msgs::msg::Int32>(
@@ -395,10 +400,11 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
   auto p = payload[idx];
   Eigen::Vector3d x_d_enu = Eigen::Vector3d(p.pos.x(), p.pos.y(), p.pos.z());
   Eigen::Vector3d v_d_enu = Eigen::Vector3d(p.vel.x(), p.vel.y(), p.vel.z());
+  Eigen::Vector3d a_d_enu = Eigen::Vector3d(p.acc.x(), p.acc.y(), p.acc.z());
   x_d_ = T_enu2ned_ * x_d_enu;
   v_d_ = T_enu2ned_ * v_d_enu;
+  a_d_ = T_enu2ned_ * a_d_enu;
   R_d_ = T_body_ * Eigen::Matrix3d::Identity() * T_enu2ned_;  // keep body aligned
-  a_d_ = Eigen::Vector3d::Zero();  // not used directly
 
   // errors for DDP
   Eigen::Vector3d e_x_ENU = T_enu2ned_ * (payload_pos_ - x_d_);
@@ -428,7 +434,7 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
   for (int i = 0; i < total_drones_; ++i) {
     const auto &c = cables[i][idx];
     Eigen::Vector3d dir_ned = T_enu2ned_ * c.dir;
-    double mu_scalar = c.mu;
+    double mu_scalar = payload_m_ * c.mu;
     mu_id_[i] = mu_scalar * dir_ned + payload_R_ * delta_mu.segment<3>(3 * i);
 
     // derivative filters to match Python smoothing (mu affects q_id through normalization)
@@ -579,12 +585,22 @@ void GeomMultiliftRealflightNode::run_control(double sim_t) {
   att.thrust_body = {0.0f, 0.0f, static_cast<float>(norm)};
   att_pub_->publish(att);
 
-  // also push trajectory setpoint for visibility
+  // also push per-drone trajectory setpoint (from csv-derived payload/cable data) for visibility
   px4_msgs::msg::TrajectorySetpoint traj;
   traj.timestamp = att.timestamp;
-  traj.position[0] = static_cast<float>(payload_pos_.x() + rho_[drone_id_].x() - offset_pos_[drone_id_].x());
-  traj.position[1] = static_cast<float>(payload_pos_.y() + rho_[drone_id_].y() - offset_pos_[drone_id_].y());
-  traj.position[2] = static_cast<float>(payload_pos_.z() + rho_[drone_id_].z() - offset_pos_[drone_id_].z());
+  const Eigen::Vector3d x_id =
+    x_d_ + R_d_ * rho_[drone_id_] - l_ * q_id_[drone_id_] - offset_pos_[drone_id_];
+  const Eigen::Vector3d v_id = v_d_ - l_ * q_id_dot_[drone_id_];
+  const Eigen::Vector3d a_id = a_d_ - l_ * q_id_ddot_[drone_id_];
+  traj.position[0] = static_cast<float>(x_id.x());
+  traj.position[1] = static_cast<float>(x_id.y());
+  traj.position[2] = static_cast<float>(x_id.z());
+  traj.velocity[0] = static_cast<float>(v_id.x());
+  traj.velocity[1] = static_cast<float>(v_id.y());
+  traj.velocity[2] = static_cast<float>(v_id.z());
+  traj.acceleration[0] = static_cast<float>(a_id.x());
+  traj.acceleration[1] = static_cast<float>(a_id.y());
+  traj.acceleration[2] = static_cast<float>(a_id.z());
   traj_pub_->publish(traj);
 }
 
