@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    data_root: "data/realflight_traj_new"
+    timer_period: 0.01
+    payload_pose_topic: "/vrpn_mocap/multilift_payload/pose"
+    l: 1.0
+    payload_mass: 1.5
+    payload_radius: 0.25
+    apply_payload_offset: false
+    kq: 9.5
+    kw: 3.4
+    z_weight: 0.0
+    thrust_bias: 0.0
+    alpha_gain: 0.0
+    payload_is_enu: true
+    log_path: ""

@@ -67,11 +67,25 @@ ament_target_dependencies(geom_multilift_realflight_node
 )
 target_link_libraries(geom_multilift_realflight_node Eigen3::Eigen)
 
+add_executable(geom_multilift_hitl_node
+  src/data_loader_new.cpp
+  src/geom_multilift_hitl_node.cpp
+  src/geom_multilift_hitl_main.cpp
+)
+ament_target_dependencies(geom_multilift_hitl_node
+  rclcpp
+  geometry_msgs
+  px4_msgs
+  std_msgs
+)
+target_link_libraries(geom_multilift_hitl_node Eigen3::Eigen)
+
 install(TARGETS
   realflight_traj_node
   geom_multilift_node
   geom_multilift_sitl_node
   geom_multilift_realflight_node
+  geom_multilift_hitl_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY include/
