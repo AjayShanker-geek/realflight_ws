@@ -198,6 +198,10 @@ GeomMultiliftHitlNode::GeomMultiliftHitlNode(int drone_id, int total_drones)
     px4_ns + "out/vehicle_odometry", rclcpp::SensorDataQoS(),
     std::bind(&GeomMultiliftHitlNode::odom_cb, this, _1));
 
+  local_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+    px4_ns + "out/vehicle_local_position", rclcpp::SensorDataQoS(),
+    std::bind(&GeomMultiliftHitlNode::local_pos_cb, this, _1));
+
   lps_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPositionSetpoint>(
     px4_ns + "out/vehicle_local_position_setpoint", rclcpp::SensorDataQoS(),
     std::bind(&GeomMultiliftHitlNode::lps_setpoint_cb, this, _1));
@@ -217,7 +221,7 @@ GeomMultiliftHitlNode::GeomMultiliftHitlNode(int drone_id, int total_drones)
   }
 
   att_pub_ = this->create_publisher<px4_msgs::msg::VehicleAttitudeSetpoint>(
-    px4_ns + "in/vehicle_attitude_setpoint", rclcpp::QoS(10));
+    px4_ns + "in/vehicle_attitude_setpoint_v1", rclcpp::QoS(10));
   traj_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
     px4_ns + "in/trajectory_setpoint", rclcpp::QoS(10));
   cmd_pub_ = this->create_publisher<std_msgs::msg::Int32>(
@@ -390,10 +394,15 @@ void GeomMultiliftHitlNode::sim_pose_cb(const geometry_msgs::msg::PoseStamped::S
 }
 
 void GeomMultiliftHitlNode::odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
-  drone_vel_ = Eigen::Vector3d(msg->velocity[0], msg->velocity[1], msg->velocity[2]);
   drone_omega_ = Eigen::Vector3d(msg->angular_velocity[0], msg->angular_velocity[1], msg->angular_velocity[2]);
   drone_R_ = quat_from_px4(*msg).toRotationMatrix();
   odom_ready_ = true;
+}
+
+void GeomMultiliftHitlNode::local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+  // Use linear velocity/accel from estimator for cable dynamics compensation.
+  drone_vel_ = Eigen::Vector3d(msg->vx, msg->vy, msg->vz);
+  drone_acc_sp_ = Eigen::Vector3d(msg->ax, msg->ay, msg->az);
 }
 
 void GeomMultiliftHitlNode::lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg) {
