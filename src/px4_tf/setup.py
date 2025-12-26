@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'tf_convert = px4_tf.tf_convert:main',
+            'tf_convert_hitl = px4_tf.tf_convert_hitl:main',
         ],
     },
 )
