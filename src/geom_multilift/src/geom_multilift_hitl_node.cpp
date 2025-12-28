@@ -9,6 +9,38 @@
 using std::placeholders::_1;
 using namespace std::chrono_literals;
 
+namespace {
+Eigen::Vector3d limit_tilt(const Eigen::Vector3d &body_z, double max_angle_rad) {
+  Eigen::Vector3d world_z(0.0, 0.0, 1.0);
+  Eigen::Vector3d bz = body_z.normalized();
+  double dot = std::clamp(world_z.dot(bz), -1.0, 1.0);
+  double angle = std::acos(dot);
+  if (angle <= max_angle_rad) {
+    return bz;
+  }
+  Eigen::Vector3d rejection = bz - dot * world_z;
+  if (rejection.norm() < 1e-6) {
+    rejection = Eigen::Vector3d(1.0, 0.0, 0.0);
+  }
+  rejection.normalize();
+  Eigen::Vector3d limited = std::cos(max_angle_rad) * world_z +
+    std::sin(max_angle_rad) * rejection;
+  return limited.normalized();
+}
+
+Eigen::Vector3d px4_body_z_from_acc(const Eigen::Vector3d &acc_sp,
+                                    double gravity = 9.81,
+                                    double max_tilt_deg = 45.0) {
+  double z_spec = -gravity + acc_sp.z();
+  Eigen::Vector3d vec(-acc_sp.x(), -acc_sp.y(), -z_spec);
+  if (vec.norm() < 1e-6) {
+    vec = Eigen::Vector3d(0.0, 0.0, 1.0);
+  }
+  Eigen::Vector3d bz = vec.normalized();
+  return limit_tilt(bz, max_tilt_deg * M_PI / 180.0);
+}
+}  // namespace
+
 AccKalmanFilter::AccKalmanFilter(double dt_init, double q_var, double r_var)
 : init_(false), q_(q_var), dt_(dt_init) {
   F_.setIdentity();
@@ -125,6 +157,7 @@ GeomMultiliftHitlNode::GeomMultiliftHitlNode(int drone_id, int total_drones)
     payload_odom_topic = payload_pose_topic;
   }
   apply_payload_offset_ = this->declare_parameter("apply_payload_offset", apply_payload_offset_);
+  acc_sp_timeout_s_ = this->declare_parameter("acc_sp_timeout", acc_sp_timeout_s_);
 
   // build transforms
   T_enu2ned_ << 0, 1, 0,
@@ -188,6 +221,7 @@ GeomMultiliftHitlNode::GeomMultiliftHitlNode(int drone_id, int total_drones)
   drone_omega_.setZero();
   drone_R_.setIdentity();
   drone_acc_sp_.setZero();
+  drone_acc_est_.setZero();
 
   // subscriptions
   payload_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
@@ -361,20 +395,17 @@ void GeomMultiliftHitlNode::payload_odom_cb(const nav_msgs::msg::Odometry::Share
     }
   }
   Eigen::Quaterniond q_meas = q_raw;
-  // Keep a copy of the raw ENU quaternion for DDP-style logging (wxyz).
   if (payload_enu_) {
     payload_q_enu_ = q_raw;
-  } else {
-    // If the incoming pose is already NED/FRD, compute the equivalent ENU/FLU quaternion.
-    Eigen::Matrix3d R_ned = q_raw.toRotationMatrix();
-    Eigen::Matrix3d R_enu = T_enu2ned_ * R_ned * T_flu2frd_;
-    payload_q_enu_ = Eigen::Quaterniond(R_enu);
-  }
-  if (payload_enu_) {
     meas = T_enu2ned_ * meas;
     Eigen::Matrix3d R_enu = q_raw.toRotationMatrix();
-    Eigen::Matrix3d R_ned = T_enu2ned_ * R_enu * T_flu2frd_;
+    // Match px4_offboard/geom_multilift.py conversion: NED <- ENU using T_enu2ned on both sides.
+    Eigen::Matrix3d R_ned = T_enu2ned_ * R_enu * T_body_;
     q_meas = Eigen::Quaterniond(R_ned);
+  } else {
+    Eigen::Matrix3d R_ned = q_raw.toRotationMatrix();
+    Eigen::Matrix3d R_enu = T_enu2ned_ * R_ned * T_body_;
+    payload_q_enu_ = Eigen::Quaterniond(R_enu);
   }
   acc_filter_.step(meas, dt);
   payload_pos_ = acc_filter_.pos();
@@ -480,11 +511,20 @@ void GeomMultiliftHitlNode::local_pos_cb(const px4_msgs::msg::VehicleLocalPositi
                          "VehicleLocalPosition velocity Z invalid (v_z_valid=%d)",
                          msg->v_z_valid);
   }
-  drone_acc_sp_ = Eigen::Vector3d(msg->ax, msg->ay, msg->az);
+  drone_acc_est_ = Eigen::Vector3d(msg->ax, msg->ay, msg->az);
+  const double now_s = this->now().seconds();
+  const double acc_age = now_s - last_acc_sp_stamp_.seconds();
+  if (!acc_sp_valid_ || (acc_sp_timeout_s_ > 0.0 && acc_age > acc_sp_timeout_s_)) {
+    drone_acc_sp_ = drone_acc_est_;
+    acc_sp_from_setpoint_ = false;
+  }
 }
 
 void GeomMultiliftHitlNode::lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg) {
   drone_acc_sp_ = Eigen::Vector3d(msg->acceleration[0], msg->acceleration[1], msg->acceleration[2]);
+  last_acc_sp_stamp_ = this->now();
+  acc_sp_valid_ = true;
+  acc_sp_from_setpoint_ = true;
 }
 
 void GeomMultiliftHitlNode::state_cb(const std_msgs::msg::Int32::SharedPtr msg) {
@@ -546,7 +586,9 @@ void GeomMultiliftHitlNode::compute_desired(double t) {
   for (int i = 0; i < total_drones_; ++i) {
     const auto &c = cables[i][idx];
     Eigen::Vector3d dir_ned = T_enu2ned_ * c.dir;
-    double mu_scalar = payload_m_ * c.mu;
+    // c.mu is already a tension magnitude in N (see preprocess_traj_new.py/plot_preprocess_traj_new.py),
+    // so do not scale by payload mass here (match SITL + Python controller).
+    double mu_scalar = c.mu;
     mu_id_[i] = mu_scalar * dir_ned + payload_R_ * delta_mu.segment<3>(3 * i);
 
     // derivative filters to match Python smoothing (mu affects q_id through normalization)
@@ -653,6 +695,26 @@ void GeomMultiliftHitlNode::run_control(double sim_t) {
   u_total = u_parallel + u_vertical;
   last_u_total_norm_ = u_total.norm();
   log_sample(sim_t, q_i, omega_i, e_qi, e_omega_i);
+
+  const uint64_t ts = this->get_clock()->now().nanoseconds() / 1000;
+  // Publish per-drone trajectory setpoint for visibility (matches traj_test PVA).
+  px4_msgs::msg::TrajectorySetpoint traj;
+  traj.timestamp = ts;
+  const Eigen::Vector3d x_id =
+    x_d_ + R_d_ * rho_[drone_id_] - l_ * q_id_[drone_id_] - offset_pos_[drone_id_];
+  const Eigen::Vector3d v_id = v_d_ - l_ * q_id_dot_[drone_id_];
+  const Eigen::Vector3d a_id = a_d_ - l_ * q_id_ddot_[drone_id_];
+  traj.position[0] = static_cast<float>(x_id.x());
+  traj.position[1] = static_cast<float>(x_id.y());
+  traj.position[2] = static_cast<float>(x_id.z());
+  traj.velocity[0] = static_cast<float>(v_id.x());
+  traj.velocity[1] = static_cast<float>(v_id.y());
+  traj.velocity[2] = static_cast<float>(v_id.z());
+  traj.acceleration[0] = static_cast<float>(a_id.x());
+  traj.acceleration[1] = static_cast<float>(a_id.y());
+  traj.acceleration[2] = static_cast<float>(a_id.z());
+  traj_pub_->publish(traj);
+
   if (!std::isfinite(last_u_total_norm_) || last_u_total_norm_ < 1e-4) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                          "u_total too small (norm=%.3e); holding setpoint",
@@ -661,9 +723,8 @@ void GeomMultiliftHitlNode::run_control(double sim_t) {
   }
 
   Eigen::Vector3d b3 = -u_total / u_total.norm();
-  // fuse with px4 accel setpoint to avoid jerk
-  Eigen::Vector3d body_z = Eigen::Vector3d(-drone_acc_sp_.x(), -drone_acc_sp_.y(), -(9.81 - drone_acc_sp_.z()));
-  if (body_z.norm() < 1e-3) body_z = b3;
+  // fuse with px4 accel setpoint and tilt-limit like Python px4_body_z
+  Eigen::Vector3d body_z = px4_body_z_from_acc(drone_acc_sp_);
   Eigen::Vector3d blended = (1.0 - z_weight_) * body_z + z_weight_ * b3;
   if (blended.norm() < 1e-6) {
     blended = b3;
@@ -707,28 +768,11 @@ void GeomMultiliftHitlNode::run_control(double sim_t) {
   norm = std::clamp(norm, -1.0, -0.1);
 
   px4_msgs::msg::VehicleAttitudeSetpoint att;
-  att.timestamp = this->get_clock()->now().nanoseconds() / 1000;
+  att.timestamp = ts;
   att.q_d = {q_set.w(), q_set.x(), q_set.y(), q_set.z()};
   att.thrust_body = {0.0f, 0.0f, static_cast<float>(norm)};
   att_pub_->publish(att);
 
-  // also push per-drone trajectory setpoint (from csv-derived payload/cable data) for visibility
-  px4_msgs::msg::TrajectorySetpoint traj;
-  traj.timestamp = att.timestamp;
-  const Eigen::Vector3d x_id =
-    x_d_ + R_d_ * rho_[drone_id_] - l_ * q_id_[drone_id_] - offset_pos_[drone_id_];
-  const Eigen::Vector3d v_id = v_d_ - l_ * q_id_dot_[drone_id_];
-  const Eigen::Vector3d a_id = a_d_ - l_ * q_id_ddot_[drone_id_];
-  traj.position[0] = static_cast<float>(x_id.x());
-  traj.position[1] = static_cast<float>(x_id.y());
-  traj.position[2] = static_cast<float>(x_id.z());
-  traj.velocity[0] = static_cast<float>(v_id.x());
-  traj.velocity[1] = static_cast<float>(v_id.y());
-  traj.velocity[2] = static_cast<float>(v_id.z());
-  traj.acceleration[0] = static_cast<float>(a_id.x());
-  traj.acceleration[1] = static_cast<float>(a_id.y());
-  traj.acceleration[2] = static_cast<float>(a_id.z());
-  traj_pub_->publish(traj);
 }
 
 void GeomMultiliftHitlNode::timer_cb() {

@@ -3,7 +3,7 @@
 Launch all SITL geometric multilift nodes in one shot.
 Spins one node per drone_id in [0, total_drones-1] using the SITL inputs:
  - /payload_odom
- - /simulation/position_drone_<i+1>
+ - PX4 vehicle_local_position (NED) for drone position
  - attitude/bodyrate from PX4 odom, linear velocity/accel from PX4 local_position
 Also launches the sync_goto state machine and a single swarm coordinator.
 """

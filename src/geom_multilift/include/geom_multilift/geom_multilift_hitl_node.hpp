@@ -101,6 +101,10 @@ private:
   double slowdown_;
   bool payload_enu_;
   bool apply_payload_offset_;
+  double acc_sp_timeout_s_{0.5};
+  bool acc_sp_valid_{false};
+  rclcpp::Time last_acc_sp_stamp_;
+  bool acc_sp_from_setpoint_{false};
 
   Eigen::Matrix3d T_enu2ned_;
   Eigen::Matrix3d T_body_;
@@ -158,6 +162,7 @@ private:
   Eigen::Vector3d drone_omega_;
   Eigen::Matrix3d drone_R_;
   Eigen::Vector3d drone_acc_sp_;
+  Eigen::Vector3d drone_acc_est_;
   bool last_local_xy_valid_{false};
   bool last_local_z_valid_{false};
   bool last_local_vxy_valid_{false};

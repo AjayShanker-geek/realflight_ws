@@ -10,6 +10,7 @@
     kq: 9.5
     kw: 3.4
     z_weight: 0.0
+    acc_sp_timeout: 0.5
     thrust_bias: 0.0
     thrust_to_weight_ratio: 7.90
     alpha_gain: 0.0

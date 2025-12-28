@@ -3,14 +3,16 @@
 #include "geom_multilift/geom_multilift_node.hpp"
 #include "geom_multilift/data_loader_new.hpp"
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <fstream>
+#include <limits>
 
 // SITL variant of the geometric multilift controller.
 // Mirrors the Python controller used in px4_offboard/geom_multilift.py:
 // - payload pose from /payload_odom (Odometry, ENU -> NED conversion)
-// - drone pose from /simulation/position_drone_<i>
+// - drone pose from PX4 vehicle_local_position (NED)
 // - attitude/bodyrate from PX4 odom, linear velocity/accel from PX4 local_position
 class GeomMultiliftSitlNode : public rclcpp::Node {
 public:
@@ -19,10 +21,10 @@ public:
 private:
   // callbacks
   void payload_odom_cb(const nav_msgs::msg::Odometry::SharedPtr msg);
-  void sim_pose_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
   void odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg);
   void local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
   void lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg);
+  void init_pose_cb(const geometry_msgs::msg::TransformStamped::SharedPtr msg);
   void state_cb(const std_msgs::msg::Int32::SharedPtr msg);
   void swarm_state_cb(const std_msgs::msg::Int32::SharedPtr msg, int other);
   void timer_cb();
@@ -42,6 +44,7 @@ private:
                   const Eigen::Vector3d &omega_i,
                   const Eigen::Vector3d &e_qi,
                   const Eigen::Vector3d &e_omega_i);
+  void log_debug(double sim_t);
 
   // parameters
   int drone_id_;
@@ -49,14 +52,25 @@ private:
   double dt_nom_;
   double l_;
   double payload_m_;
+  double payload_radius_;
   double m_drones_;
   double kq_;
   double kw_;
   double alpha_gain_;
   double z_weight_;
   double thrust_bias_;
+  double thrust_to_weight_ratio_;
   double slowdown_;
   bool payload_enu_;
+  bool apply_payload_offset_;
+  bool apply_init_pos_offset_;
+  Eigen::Vector3d local_pos_offset_ned_;
+  bool init_pos_received_{false};
+  Eigen::Vector3d init_pos_offset_ned_{Eigen::Vector3d::Zero()};
+  double acc_sp_timeout_s_{0.5};
+  bool acc_sp_valid_{false};
+  rclcpp::Time last_acc_sp_stamp_;
+  bool acc_sp_from_setpoint_{false};
 
   Eigen::Matrix3d T_enu2ned_;
   Eigen::Matrix3d T_body_;
@@ -66,6 +80,10 @@ private:
   Eigen::Matrix<double, 6, Eigen::Dynamic> P_;  // 6 x 3n
   std::ofstream log_file_;
   bool log_enabled_{false};
+  std::ofstream debug_log_file_;
+  bool debug_log_enabled_{false};
+  double debug_log_period_s_{0.2};
+  double last_debug_log_time_s_{std::numeric_limits<double>::quiet_NaN()};
   Eigen::Quaternionf att_sp_prev_;
   bool att_sp_prev_valid_{false};
 
@@ -78,10 +96,10 @@ private:
 
   // ROS handles
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr payload_sub_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sim_pose_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPositionSetpoint>::SharedPtr lps_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr init_pos_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr state_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr> swarm_subs_;
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr att_pub_;
@@ -92,8 +110,7 @@ private:
   // current states
   bool payload_ready_;
   bool odom_ready_;
-  bool sim_pose_ready_;
-  geometry_msgs::msg::PoseStamped last_sim_pose_;
+  bool local_pos_ready_;
   nav_msgs::msg::Odometry last_payload_odom_;
   rclcpp::Time last_payload_stamp_;
   double last_sim_time_;
@@ -114,8 +131,13 @@ private:
   Eigen::Vector3d drone_omega_;
   Eigen::Matrix3d drone_R_;
   Eigen::Vector3d drone_acc_sp_;
-  Eigen::Vector3d sim_offset_;
-  bool sim_offset_init_;
+  Eigen::Vector3d drone_acc_est_;
+  bool last_local_xy_valid_{false};
+  bool last_local_z_valid_{false};
+  bool last_local_vxy_valid_{false};
+  bool last_local_vz_valid_{false};
+  double last_vec_norm_{std::numeric_limits<double>::quiet_NaN()};
+  double last_u_total_norm_{std::numeric_limits<double>::quiet_NaN()};
 
   // desired states
   Eigen::Vector3d x_d_;
