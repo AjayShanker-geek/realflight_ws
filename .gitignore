@@ -18,3 +18,7 @@ __pycache__/
 
 # data convert
 raw_data/
+
+# logs
+*log
+
