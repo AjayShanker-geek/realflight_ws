@@ -423,7 +423,7 @@ L2CNode::L2CNode(int drone_id, int total_drones)
   // subscriptions
   if (payload_input_ == "pose") {
     payload_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-      payload_pose_topic_, rclcpp::QoS(10),
+      payload_pose_topic_, rclcpp::SensorDataQoS(),
       std::bind(&L2CNode::payload_pose_cb, this, _1));
   } else if (payload_input_ == "odom") {
     payload_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
