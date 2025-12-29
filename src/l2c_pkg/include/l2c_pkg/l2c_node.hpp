@@ -1,19 +1,24 @@
 #pragma once
 
-#include "geom_multilift/data_loader_new.hpp"
+#include "l2c_pkg/data_loader_new.hpp"
+
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_local_position_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_attitude_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <map>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <string>
 #include <vector>
 
 class AccKalmanFilter {
@@ -23,8 +28,10 @@ public:
   const Eigen::Vector3d &pos() const { return pos_; }
   const Eigen::Vector3d &vel() const { return vel_; }
   const Eigen::Vector3d &acc() const { return acc_; }
+
 private:
   void build(double dt);
+
   Eigen::Matrix<double, 9, 9> F_;
   Eigen::Matrix<double, 9, 9> Q_;
   Eigen::Matrix<double, 3, 9> H_;
@@ -51,33 +58,40 @@ enum class FsmState {
   DONE = 8
 };
 
-class GeomMultiliftRealflightNode : public rclcpp::Node {
+class L2CNode : public rclcpp::Node {
 public:
-  GeomMultiliftRealflightNode(int drone_id, int total_drones);
+  L2CNode(int drone_id, int total_drones);
 
 private:
+  // callbacks
   void payload_pose_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void payload_odom_cb(const nav_msgs::msg::Odometry::SharedPtr msg);
   void odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg);
   void local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
   void lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg);
+  void init_pose_cb(const geometry_msgs::msg::TransformStamped::SharedPtr msg);
   void state_cb(const std_msgs::msg::Int32::SharedPtr msg);
   void swarm_state_cb(const std_msgs::msg::Int32::SharedPtr msg, int other);
   void timer_cb();
 
   // helpers
   Eigen::Matrix3d hat(const Eigen::Vector3d &v) const;
+  Eigen::Vector3d vee(const Eigen::Matrix3d &M) const;
   Eigen::Quaterniond quat_from_msg(const geometry_msgs::msg::PoseStamped &msg) const;
   Eigen::Quaterniond quat_from_px4(const px4_msgs::msg::VehicleOdometry &msg) const;
-  bool all_ready() const;
-
-  // desired interpolation
-  void compute_desired(double t);
-
-  // controller
-  void run_control(double sim_t);
-  Eigen::Vector3d vee(const Eigen::Matrix3d &M) const;
   Eigen::Vector3d lowpass(const Eigen::Vector3d &x, Eigen::Vector3d &y_prev,
                           double cutoff_hz, double dt, bool &init) const;
+  bool all_ready() const;
+
+  void update_payload(const Eigen::Vector3d &pos, const Eigen::Quaterniond &q_raw,
+                      const rclcpp::Time &stamp);
+  void update_sim_time(const rclcpp::Time &stamp);
+  void check_state_internal(double t);
+  void reset_trajectory_state();
+  void publish_command(FsmState state, bool all_drones);
+
+  void compute_desired(double t);
+  void run_control(double sim_t);
   void log_sample(double sim_t,
                   const Eigen::Vector3d &q_i,
                   const Eigen::Vector3d &omega_i,
@@ -89,8 +103,9 @@ private:
   int drone_id_;
   int total_drones_;
   double dt_nom_;
-  double l_;           // cable length
+  double l_;
   double payload_m_;
+  double payload_added_mass_;
   double payload_radius_;
   double m_drones_;
   double kq_;
@@ -102,22 +117,38 @@ private:
   double slowdown_;
   bool payload_enu_;
   bool apply_payload_offset_;
-  double acc_sp_timeout_s_{0.5};
-  bool acc_sp_valid_{false};
+  bool apply_init_pos_offset_;
+  bool use_internal_state_machine_;
+  bool use_payload_stamp_time_;
+  bool command_all_drones_;
+  bool lps_transient_local_;
+  std::string payload_input_;
+  std::string payload_pose_topic_;
+  std::string payload_odom_topic_;
+  std::string init_pose_topic_;
+  std::string attitude_setpoint_topic_;
+  double acc_sp_timeout_s_;
+  bool acc_sp_valid_;
+  bool acc_sp_from_setpoint_;
   rclcpp::Time last_acc_sp_stamp_;
-  bool acc_sp_from_setpoint_{false};
+  Eigen::Vector3d local_pos_offset_ned_;
+  bool init_pos_received_;
+  Eigen::Vector3d init_pos_offset_ned_;
+  double initial_ready_delay_;
+  Eigen::Vector3d payload_rp_;
+  Eigen::Vector3d payload_rg_;
 
   Eigen::Matrix3d T_enu2ned_;
   Eigen::Matrix3d T_body_;
   Eigen::Matrix3d T_flu2frd_;
   std::vector<Eigen::Vector3d> rho_;
   std::vector<Eigen::Vector3d> offset_pos_;
-  Eigen::Matrix<double, 6, Eigen::Dynamic> P_;  // 6 x 3n
+  Eigen::Matrix<double, 6, Eigen::Dynamic> P_;
   std::ofstream log_file_;
   bool log_enabled_{false};
   std::ofstream debug_log_file_;
   bool debug_log_enabled_{false};
-  double debug_log_period_s_{1.0};
+  double debug_log_period_s_{0.5};
   double last_debug_log_time_s_{std::numeric_limits<double>::quiet_NaN()};
   Eigen::Quaternionf att_sp_prev_;
   bool att_sp_prev_valid_{false};
@@ -130,22 +161,23 @@ private:
   AccKalmanFilter acc_filter_;
 
   // ROS handles
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr payload_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr payload_pose_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr payload_odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleLocalPositionSetpoint>::SharedPtr lps_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::TransformStamped>::SharedPtr init_pos_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr state_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr> swarm_subs_;
   rclcpp::Publisher<px4_msgs::msg::VehicleAttitudeSetpoint>::SharedPtr att_pub_;
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr traj_pub_;
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr cmd_pub_;
+  std::vector<rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr> cmd_pubs_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   // current states
   bool payload_ready_;
   bool odom_ready_;
   bool local_pos_ready_;
-  geometry_msgs::msg::PoseStamped last_payload_pose_;
   rclcpp::Time last_payload_stamp_;
   Eigen::Vector3d payload_pos_;
   Eigen::Vector3d payload_vel_;
@@ -196,7 +228,7 @@ private:
   std::vector<bool> mu_ddot_filter_init_;
   std::vector<bool> mu_history_init_;
 
-  // timers
+  // timers / trajectory state
   rclcpp::Time traj_start_;
   bool traj_started_;
   bool traj_completed_;
@@ -204,6 +236,18 @@ private:
   rclcpp::Time last_control_stamp_;
   bool control_dt_init_{false};
   double control_dt_{0.0};
+
+  bool traj_ready_;
+  bool traj_done_;
+  std::vector<bool> traj_done_bit_;
+  double sim_time_;
+  double last_sim_time_;
+  double sim_dt_;
+  double sim_t0_;
+  double traj_t0_;
+  double t_wait_traj_;
+  double ready_since_;
+  bool ready_since_valid_;
 
   // fsm
   FsmState current_state_;

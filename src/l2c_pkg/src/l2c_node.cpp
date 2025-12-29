@@ -1,10 +1,14 @@
-#include "geom_multilift/geom_multilift_realflight_node.hpp"
+#include "l2c_pkg/l2c_node.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
+#include <sstream>
+#include <ctime>
+#include <unordered_map>
+#include <system_error>
 
 using std::placeholders::_1;
 using namespace std::chrono_literals;
@@ -38,6 +42,63 @@ Eigen::Vector3d px4_body_z_from_acc(const Eigen::Vector3d &acc_sp,
   }
   Eigen::Vector3d bz = vec.normalized();
   return limit_tilt(bz, max_tilt_deg * M_PI / 180.0);
+}
+
+std::string timestamp_string() {
+  auto now = std::chrono::system_clock::now();
+  std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+  std::tm tm {};
+#ifdef _WIN32
+  localtime_s(&tm, &now_time);
+#else
+  localtime_r(&now_time, &tm);
+#endif
+  std::ostringstream oss;
+  oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
+  return oss.str();
+}
+
+bool looks_like_dir(const std::string &path) {
+  if (path.empty()) {
+    return false;
+  }
+  const char last = path.back();
+  if (last == '/' || last == '\\') {
+    return true;
+  }
+  std::filesystem::path p(path);
+  if (p.has_extension()) {
+    return false;
+  }
+  std::error_code ec;
+  if (std::filesystem::is_directory(p, ec)) {
+    return true;
+  }
+  return !p.has_extension();
+}
+
+std::string create_run_dir(const std::string &base_dir) {
+  std::filesystem::path base(base_dir);
+  std::error_code ec;
+  std::filesystem::create_directories(base, ec);
+  if (ec) {
+    return base.string();
+  }
+  const std::string stamp = timestamp_string();
+  for (int idx = 1; idx <= 999; ++idx) {
+    std::ostringstream name;
+    name << "exp_" << stamp << "_run" << std::setfill('0') << std::setw(3) << idx;
+    std::filesystem::path candidate = base / name.str();
+    std::error_code ec_try;
+    bool created = std::filesystem::create_directory(candidate, ec_try);
+    if (created) {
+      return candidate.string();
+    }
+    if (ec_try && ec_try != std::errc::file_exists) {
+      break;
+    }
+  }
+  return base.string();
 }
 }  // namespace
 
@@ -101,13 +162,14 @@ void AccKalmanFilter::step(const Eigen::Vector3d &z, double dt) {
   acc_ = x_.segment<3>(6);
 }
 
-GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total_drones)
-: Node("geom_multilift_realflight_new_" + std::to_string(drone_id))
+L2CNode::L2CNode(int drone_id, int total_drones)
+: Node("l2c_node_" + std::to_string(drone_id))
 , drone_id_(drone_id)
 , total_drones_(total_drones)
 , dt_nom_(0.01)
 , l_(1.0)
 , payload_m_(1.5)
+, payload_added_mass_(0.0)
 , payload_radius_(0.25)
 , m_drones_(0.25)
 , kq_(9.5)
@@ -117,41 +179,178 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
 , thrust_bias_(0.0)
 , thrust_to_weight_ratio_(7.90)
 , slowdown_(1.0)
-, payload_enu_(true)  // assume mocap publishes ENU PoseStamped
+, payload_enu_(true)
 , apply_payload_offset_(true)
+, apply_init_pos_offset_(false)
+, use_internal_state_machine_(false)
+, use_payload_stamp_time_(false)
+, command_all_drones_(false)
+, lps_transient_local_(false)
+, payload_input_("pose")
+, payload_pose_topic_("")
+, payload_odom_topic_("")
+, init_pose_topic_("")
+, attitude_setpoint_topic_("in/vehicle_attitude_setpoint")
+, acc_sp_timeout_s_(0.5)
+, acc_sp_valid_(false)
+, acc_sp_from_setpoint_(false)
+, local_pos_offset_ned_(Eigen::Vector3d::Zero())
+, init_pos_received_(false)
+, init_pos_offset_ned_(Eigen::Vector3d::Zero())
+, initial_ready_delay_(5.0)
+, payload_rp_(Eigen::Vector3d::Zero())
+, payload_rg_(Eigen::Vector3d::Zero())
 , acc_filter_(dt_nom_, 1e-5, 2e-5)
-, traj_started_(false)
-, traj_completed_(false)
-, traj_time_init_(false)
 , payload_ready_(false)
 , odom_ready_(false)
 , local_pos_ready_(false)
-, current_state_(FsmState::INIT)
 , payload_omega_init_(false)
+, traj_started_(false)
+, traj_completed_(false)
+, traj_time_init_(false)
+, traj_ready_(false)
+, traj_done_(false)
+, sim_time_(0.0)
+, last_sim_time_(0.0)
+, sim_dt_(dt_nom_)
+, sim_t0_(0.0)
+, traj_t0_(0.0)
+, t_wait_traj_(0.0)
+, ready_since_(0.0)
+, ready_since_valid_(false)
+, current_state_(FsmState::INIT)
 {
+  std::string mode = this->declare_parameter("mode", std::string("realflight"));
+  if (mode == "sitl") {
+    payload_m_ = 1.0;
+    kq_ = 16.0;
+    kw_ = 8.0;
+    use_internal_state_machine_ = true;
+    use_payload_stamp_time_ = true;
+    command_all_drones_ = true;
+    lps_transient_local_ = true;
+    payload_input_ = "odom";
+    payload_pose_topic_ = "/payload_odom";
+    payload_odom_topic_ = "/payload_odom";
+    attitude_setpoint_topic_ = "in/vehicle_attitude_setpoint_v1";
+    debug_log_period_s_ = 0.2;
+  } else if (mode == "hitl") {
+    payload_input_ = "odom";
+    payload_odom_topic_ = "/payload_odom";
+    attitude_setpoint_topic_ = "in/vehicle_attitude_setpoint_v1";
+    debug_log_period_s_ = 1.0;
+  } else if (mode == "realflight") {
+    payload_input_ = "pose";
+    payload_pose_topic_ = "/vrpn_mocap/multilift_payload/pose";
+    attitude_setpoint_topic_ = "in/vehicle_attitude_setpoint";
+    debug_log_period_s_ = 1.0;
+  }
+
   dt_nom_ = this->declare_parameter("timer_period", dt_nom_);
   l_ = this->declare_parameter("l", l_);
   payload_m_ = this->declare_parameter("payload_mass", payload_m_);
+  payload_added_mass_ = this->declare_parameter("payload_added_mass", payload_added_mass_);
+  std::vector<double> rp_param = this->declare_parameter(
+    "payload_rp", std::vector<double>{0.0, 0.0, 0.0});
+  if (rp_param.size() == 3) {
+    payload_rp_ = Eigen::Vector3d(rp_param[0], rp_param[1], rp_param[2]);
+  } else if (rp_param.size() == 2) {
+    payload_rp_ = Eigen::Vector3d(rp_param[0], rp_param[1], 0.0);
+  } else {
+    payload_rp_.setZero();
+    RCLCPP_WARN(this->get_logger(), "payload_rp must have 2 or 3 elements; using zeros");
+  }
   payload_radius_ = this->declare_parameter("payload_radius", payload_radius_);
   kq_ = this->declare_parameter("kq", kq_);
   kw_ = this->declare_parameter("kw", kw_);
   z_weight_ = this->declare_parameter("z_weight", z_weight_);
   thrust_bias_ = this->declare_parameter("thrust_bias", thrust_bias_);
   thrust_to_weight_ratio_ = this->declare_parameter("thrust_to_weight_ratio", thrust_to_weight_ratio_);
-  std::string data_root = this->declare_parameter(
-    "data_root",
-    std::string("data/realflight_traj_new"));
   alpha_gain_ = this->declare_parameter("alpha_gain", alpha_gain_);
+  slowdown_ = this->declare_parameter("slowdown", slowdown_);
+  payload_enu_ = this->declare_parameter("payload_is_enu", payload_enu_);
+  apply_payload_offset_ = this->declare_parameter("apply_payload_offset", apply_payload_offset_);
+  apply_init_pos_offset_ = this->declare_parameter("apply_init_pose_offset", apply_init_pos_offset_);
+  acc_sp_timeout_s_ = this->declare_parameter("acc_sp_timeout", acc_sp_timeout_s_);
+  initial_ready_delay_ = this->declare_parameter("initial_ready_delay", initial_ready_delay_);
+  payload_input_ = this->declare_parameter("payload_input", payload_input_);
+  use_internal_state_machine_ = this->declare_parameter("use_internal_state_machine", use_internal_state_machine_);
+  use_payload_stamp_time_ = this->declare_parameter("use_payload_stamp_time", use_payload_stamp_time_);
+  command_all_drones_ = this->declare_parameter("command_all_drones", command_all_drones_);
+  lps_transient_local_ = this->declare_parameter("lps_transient_local", lps_transient_local_);
+  attitude_setpoint_topic_ = this->declare_parameter("attitude_setpoint_topic", attitude_setpoint_topic_);
+  std::string data_root = this->declare_parameter("data_root", std::string("data/realflight_traj_new"));
+  bool enable_log = this->declare_parameter("enable_log", true);
+  bool enable_debug_log = this->declare_parameter("enable_debug_log", true);
   std::string log_path = this->declare_parameter("log_path", std::string(""));
   std::string default_debug_log =
-    "log/geom_multilift_realflight_debug_drone_" + std::to_string(drone_id_) + ".csv";
+    "log/l2c_debug_" + mode + "_drone_" + std::to_string(drone_id_) + ".csv";
   std::string debug_log_path = this->declare_parameter("debug_log_path", default_debug_log);
   debug_log_period_s_ = this->declare_parameter("debug_log_period", debug_log_period_s_);
-  std::string payload_pose_topic = this->declare_parameter(
-    "payload_pose_topic",
-    std::string("/vrpn_mocap/multilift_payload/pose"));
-  apply_payload_offset_ = this->declare_parameter("apply_payload_offset", apply_payload_offset_);
-  acc_sp_timeout_s_ = this->declare_parameter("acc_sp_timeout", acc_sp_timeout_s_);
+  if (!enable_log) {
+    log_path.clear();
+  }
+  if (!enable_debug_log) {
+    debug_log_path.clear();
+  }
+  std::unordered_map<std::string, std::string> run_dirs;
+  auto resolve_log_path = [this, &mode, &run_dirs](const std::string &path, const std::string &prefix) -> std::string {
+    if (path.empty()) {
+      return std::string();
+    }
+    if (!looks_like_dir(path)) {
+      return path;
+    }
+    auto it = run_dirs.find(path);
+    if (it == run_dirs.end()) {
+      run_dirs[path] = create_run_dir(path);
+      it = run_dirs.find(path);
+    }
+    std::filesystem::path p(it->second);
+    std::string filename = prefix + "_" + mode + "_drone_" + std::to_string(drone_id_) + ".csv";
+    return (p / filename).string();
+  };
+  log_path = resolve_log_path(log_path, "l2c_log");
+  debug_log_path = resolve_log_path(debug_log_path, "l2c_debug");
+  payload_pose_topic_ = this->declare_parameter("payload_pose_topic", payload_pose_topic_);
+  payload_odom_topic_ = this->declare_parameter("payload_odom_topic", payload_odom_topic_);
+  init_pose_topic_ = this->declare_parameter("init_pose_topic", init_pose_topic_);
+  if (init_pose_topic_.empty()) {
+    init_pose_topic_ = "/drone_" + std::to_string(drone_id_) + "_init_pos";
+  }
+  if (payload_input_ == "odom" && payload_odom_topic_.empty()) {
+    payload_odom_topic_ = payload_pose_topic_;
+  }
+  if (payload_input_ == "pose" && payload_pose_topic_.empty()) {
+    payload_pose_topic_ = payload_odom_topic_;
+  }
+  if (use_internal_state_machine_) {
+    command_all_drones_ = true;
+  }
+
+  std::vector<double> local_pos_offset = this->declare_parameter(
+    "local_pos_offset", std::vector<double>{0.0, 0.0, 0.0});
+  if (local_pos_offset.size() == 3) {
+    local_pos_offset_ned_ = Eigen::Vector3d(local_pos_offset[0],
+                                            local_pos_offset[1],
+                                            local_pos_offset[2]);
+  } else {
+    local_pos_offset_ned_.setZero();
+    RCLCPP_WARN(this->get_logger(), "local_pos_offset must have 3 elements; using zeros");
+  }
+
+  double payload_total_mass = payload_m_ + payload_added_mass_;
+  if (payload_total_mass > 1e-9) {
+    payload_rg_ = (payload_added_mass_ / payload_total_mass) * payload_rp_;
+  } else {
+    payload_rg_.setZero();
+  }
+  if (payload_added_mass_ > 0.0 || payload_rp_.norm() > 0.0) {
+    RCLCPP_INFO(this->get_logger(),
+                "payload_rp=[%.4f %.4f %.4f], payload_rg=[%.4f %.4f %.4f]",
+                payload_rp_.x(), payload_rp_.y(), payload_rp_.z(),
+                payload_rg_.x(), payload_rg_.y(), payload_rg_.z());
+  }
 
   // build transforms
   T_enu2ned_ << 0, 1, 0,
@@ -160,8 +359,6 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   T_body_ = T_enu2ned_;
   T_flu2frd_ = Eigen::Vector3d(1.0, -1.0, -1.0).asDiagonal();
 
-  payload_enu_ = this->declare_parameter("payload_is_enu", payload_enu_);
-
   // geometry
   double payload_r = payload_radius_;
   double offset_r = apply_payload_offset_ ? (l_ + payload_r) : 0.0;
@@ -169,10 +366,16 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
     double angle = 2.0 * M_PI * i / static_cast<double>(total_drones_);
     double y = payload_r * std::cos(angle);
     double x = payload_r * std::sin(angle);
-    rho_.push_back(Eigen::Vector3d(x, y, 0.0));
+    Eigen::Vector3d attach(x, y, 0.0);
+    rho_.push_back(attach - payload_rg_);
     double y_off = offset_r * std::cos(angle);
     double x_off = offset_r * std::sin(angle);
-    offset_pos_.push_back(Eigen::Vector3d(x_off, y_off, 0.0));
+    Eigen::Vector3d offset(x_off, y_off, 0.0);
+    if (apply_payload_offset_) {
+      offset_pos_.push_back(offset - payload_rg_);
+    } else {
+      offset_pos_.push_back(offset);
+    }
   }
   P_.resize(6, 3 * total_drones_);
   P_.setZero();
@@ -205,10 +408,10 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   payload_acc_.setZero();
   payload_q_.setIdentity();
   payload_R_.setIdentity();
+  payload_q_enu_.setIdentity();
   payload_omega_.setZero();
   payload_omega_dot_.setZero();
   payload_omega_prev_.setZero();
-  payload_q_enu_.setIdentity();
 
   drone_pos_.setZero();
   drone_vel_.setZero();
@@ -218,25 +421,47 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
   drone_acc_est_.setZero();
 
   // subscriptions
-  payload_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-    payload_pose_topic, 10, std::bind(&GeomMultiliftRealflightNode::payload_pose_cb, this, _1));
+  if (payload_input_ == "pose") {
+    payload_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+      payload_pose_topic_, rclcpp::QoS(10),
+      std::bind(&L2CNode::payload_pose_cb, this, _1));
+  } else if (payload_input_ == "odom") {
+    payload_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      payload_odom_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&L2CNode::payload_odom_cb, this, _1));
+  } else {
+    RCLCPP_WARN(this->get_logger(), "Unknown payload_input '%s'; defaulting to odom", payload_input_.c_str());
+    payload_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+      payload_odom_topic_, rclcpp::SensorDataQoS(),
+      std::bind(&L2CNode::payload_odom_cb, this, _1));
+  }
 
   std::string px4_ns = (drone_id_ == 0) ? "/fmu/" : "/px4_" + std::to_string(drone_id_) + "/fmu/";
   odom_sub_ = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
     px4_ns + "out/vehicle_odometry", rclcpp::SensorDataQoS(),
-    std::bind(&GeomMultiliftRealflightNode::odom_cb, this, _1));
+    std::bind(&L2CNode::odom_cb, this, _1));
 
   local_pos_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
     px4_ns + "out/vehicle_local_position", rclcpp::SensorDataQoS(),
-    std::bind(&GeomMultiliftRealflightNode::local_pos_cb, this, _1));
+    std::bind(&L2CNode::local_pos_cb, this, _1));
 
+  rclcpp::QoS lps_qos = lps_transient_local_
+    ? rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().transient_local()
+    : rclcpp::SensorDataQoS();
   lps_sub_ = this->create_subscription<px4_msgs::msg::VehicleLocalPositionSetpoint>(
-    px4_ns + "out/vehicle_local_position_setpoint", rclcpp::SensorDataQoS(),
-    std::bind(&GeomMultiliftRealflightNode::lps_setpoint_cb, this, _1));
+    px4_ns + "out/vehicle_local_position_setpoint", lps_qos,
+    std::bind(&L2CNode::lps_setpoint_cb, this, _1));
+
+  if (apply_init_pos_offset_) {
+    auto init_qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
+    init_pos_sub_ = this->create_subscription<geometry_msgs::msg::TransformStamped>(
+      init_pose_topic_, init_qos,
+      std::bind(&L2CNode::init_pose_cb, this, _1));
+  }
 
   state_sub_ = this->create_subscription<std_msgs::msg::Int32>(
     "/state/state_drone_" + std::to_string(drone_id_), rclcpp::QoS(10),
-    std::bind(&GeomMultiliftRealflightNode::state_cb, this, _1));
+    std::bind(&L2CNode::state_cb, this, _1));
   for (int i = 0; i < total_drones_; ++i) {
     swarm_states_[i] = FsmState::INIT;
     if (i == drone_id_) continue;
@@ -248,31 +473,51 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
     swarm_subs_.push_back(sub);
   }
 
+  std::string att_topic = attitude_setpoint_topic_;
+  if (!att_topic.empty() && att_topic.front() != '/') {
+    att_topic = px4_ns + att_topic;
+  }
   att_pub_ = this->create_publisher<px4_msgs::msg::VehicleAttitudeSetpoint>(
-    px4_ns + "in/vehicle_attitude_setpoint", rclcpp::QoS(10));
+    att_topic, rclcpp::QoS(10));
   traj_pub_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
     px4_ns + "in/trajectory_setpoint", rclcpp::QoS(10));
-  cmd_pub_ = this->create_publisher<std_msgs::msg::Int32>(
-    "/state/command_drone_" + std::to_string(drone_id_), rclcpp::QoS(10));
+
+  if (command_all_drones_) {
+    for (int i = 0; i < total_drones_; ++i) {
+      cmd_pubs_.push_back(
+        this->create_publisher<std_msgs::msg::Int32>(
+          "/state/command_drone_" + std::to_string(i), rclcpp::QoS(10)));
+    }
+    traj_done_bit_.assign(total_drones_, false);
+  } else {
+    cmd_pubs_.push_back(
+      this->create_publisher<std_msgs::msg::Int32>(
+        "/state/command_drone_" + std::to_string(drone_id_), rclcpp::QoS(10)));
+  }
 
   if (!log_path.empty()) {
+    std::filesystem::path log_file_path(log_path);
+    if (log_file_path.has_parent_path()) {
+      std::error_code ec;
+      std::filesystem::create_directories(log_file_path.parent_path(), ec);
+      if (ec) {
+        std::string parent_dir = log_file_path.parent_path().string();
+        RCLCPP_WARN(this->get_logger(), "Failed to create log dir: %s (%s)",
+                    parent_dir.c_str(), ec.message().c_str());
+      }
+    }
     log_file_.open(log_path, std::ios::out | std::ios::trunc);
     if (log_file_.is_open()) {
       log_file_ << "t,"
-                // payload pos/vel (NED) + DDP errors (ENU)
                 << "x_d_x,x_d_y,x_d_z,x_x,x_y,x_z,ex_ned_x,ex_ned_y,ex_ned_z,ex_enu_x,ex_enu_y,ex_enu_z,"
                 << "v_d_x,v_d_y,v_d_z,v_x,v_y,v_z,ev_ned_x,ev_ned_y,ev_ned_z,ev_enu_x,ev_enu_y,ev_enu_z,"
-                // DDP quaternion error (ENU, wxyz) + Euler angles (ENU, roll/pitch/yaw)
                 << "q_d_w,q_d_x,q_d_y,q_d_z,q_w,q_x,q_y,q_z,eq_w,eq_x,eq_y,eq_z,"
                 << "rpy_d_roll,rpy_d_pitch,rpy_d_yaw,rpy_roll,rpy_pitch,rpy_yaw,rpy_err_roll,rpy_err_pitch,rpy_err_yaw,"
-                // payload body rates: ENU-mapped (for DDP) and raw body omega
                 << "omega_d_enu_x,omega_d_enu_y,omega_d_enu_z,omega_enu_x,omega_enu_y,omega_enu_z,"
                 << "eomega_enu_x,eomega_enu_y,eomega_enu_z,omega_body_x,omega_body_y,omega_body_z,"
-                // DDP feedback wrench and delta_mu segment
                 << "FM_body_Fx,FM_body_Fy,FM_body_Fz,FM_body_Mx,FM_body_My,FM_body_Mz,"
                 << "FM_frd_Fx,FM_frd_Fy,FM_frd_Fz,FM_frd_Mx,FM_frd_My,FM_frd_Mz,"
                 << "delta_mu_x,delta_mu_y,delta_mu_z,"
-                // cable direction/omega setpoints, measurements, and errors
                 << "q_id_x,q_id_y,q_id_z,q_i_x,q_i_y,q_i_z,q_diff_x,q_diff_y,q_diff_z,eq_cable_x,eq_cable_y,eq_cable_z,"
                 << "omega_id_x,omega_id_y,omega_id_z,omega_i_x,omega_i_y,omega_i_z,"
                 << "omega_diff_x,omega_diff_y,omega_diff_z,ew_cable_x,ew_cable_y,ew_cable_z"
@@ -297,8 +542,8 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
     }
     debug_log_file_.open(debug_log_path, std::ios::out | std::ios::trunc);
     if (debug_log_file_.is_open()) {
-      debug_log_file_ << "t,sim_t,state,payload_ready,odom_ready,local_pos_ready,"
-                      << "xy_valid,z_valid,v_xy_valid,v_z_valid,"
+      debug_log_file_ << "t,sim_t,state,payload_ready,odom_ready,local_pos_ready,init_pos_ready,"
+                      << "xy_valid,z_valid,v_xy_valid,v_z_valid,acc_sp_from_setpoint,"
                       << "drone_x,drone_y,drone_z,payload_x,payload_y,payload_z,"
                       << "vec_norm,u_total_norm\n";
       debug_log_enabled_ = true;
@@ -308,12 +553,14 @@ GeomMultiliftRealflightNode::GeomMultiliftRealflightNode(int drone_id, int total
     }
   }
 
+  last_acc_sp_stamp_ = this->now();
+
   timer_ = this->create_wall_timer(
     std::chrono::duration<double>(dt_nom_),
-    std::bind(&GeomMultiliftRealflightNode::timer_cb, this));
+    std::bind(&L2CNode::timer_cb, this));
 }
 
-Eigen::Matrix3d GeomMultiliftRealflightNode::hat(const Eigen::Vector3d &v) const {
+Eigen::Matrix3d L2CNode::hat(const Eigen::Vector3d &v) const {
   Eigen::Matrix3d m;
   m << 0, -v.z(), v.y(),
        v.z(), 0, -v.x(),
@@ -321,18 +568,7 @@ Eigen::Matrix3d GeomMultiliftRealflightNode::hat(const Eigen::Vector3d &v) const
   return m;
 }
 
-Eigen::Quaterniond GeomMultiliftRealflightNode::quat_from_msg(const geometry_msgs::msg::PoseStamped &msg) const {
-  return Eigen::Quaterniond(msg.pose.orientation.w,
-                            msg.pose.orientation.x,
-                            msg.pose.orientation.y,
-                            msg.pose.orientation.z);
-}
-
-Eigen::Quaterniond GeomMultiliftRealflightNode::quat_from_px4(const px4_msgs::msg::VehicleOdometry &msg) const {
-  return Eigen::Quaterniond(msg.q[0], msg.q[1], msg.q[2], msg.q[3]);
-}
-
-Eigen::Vector3d GeomMultiliftRealflightNode::vee(const Eigen::Matrix3d &M) const {
+Eigen::Vector3d L2CNode::vee(const Eigen::Matrix3d &M) const {
   return Eigen::Vector3d(
     M(2,1) - M(1,2),
     M(0,2) - M(2,0),
@@ -340,7 +576,18 @@ Eigen::Vector3d GeomMultiliftRealflightNode::vee(const Eigen::Matrix3d &M) const
   ) * 0.5;
 }
 
-Eigen::Vector3d GeomMultiliftRealflightNode::lowpass(
+Eigen::Quaterniond L2CNode::quat_from_msg(const geometry_msgs::msg::PoseStamped &msg) const {
+  return Eigen::Quaterniond(msg.pose.orientation.w,
+                            msg.pose.orientation.x,
+                            msg.pose.orientation.y,
+                            msg.pose.orientation.z);
+}
+
+Eigen::Quaterniond L2CNode::quat_from_px4(const px4_msgs::msg::VehicleOdometry &msg) const {
+  return Eigen::Quaterniond(msg.q[0], msg.q[1], msg.q[2], msg.q[3]);
+}
+
+Eigen::Vector3d L2CNode::lowpass(
   const Eigen::Vector3d &x, Eigen::Vector3d &y_prev,
   double cutoff_hz, double dt, bool &init) const {
   if (!init) {
@@ -354,25 +601,39 @@ Eigen::Vector3d GeomMultiliftRealflightNode::lowpass(
   return y_prev;
 }
 
-bool GeomMultiliftRealflightNode::all_ready() const {
+bool L2CNode::all_ready() const {
   for (const auto &kv : swarm_states_) {
     if (kv.second != FsmState::TRAJ) return false;
   }
   return true;
 }
 
-void GeomMultiliftRealflightNode::payload_pose_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+void L2CNode::payload_pose_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  Eigen::Vector3d pos(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+  Eigen::Quaterniond q_raw = quat_from_msg(*msg);
+  update_payload(pos, q_raw, msg->header.stamp);
+}
+
+void L2CNode::payload_odom_cb(const nav_msgs::msg::Odometry::SharedPtr msg) {
+  Eigen::Vector3d pos(msg->pose.pose.position.x,
+                      msg->pose.pose.position.y,
+                      msg->pose.pose.position.z);
+  Eigen::Quaterniond q_raw(msg->pose.pose.orientation.w,
+                           msg->pose.pose.orientation.x,
+                           msg->pose.pose.orientation.y,
+                           msg->pose.pose.orientation.z);
+  update_payload(pos, q_raw, msg->header.stamp);
+}
+
+void L2CNode::update_payload(const Eigen::Vector3d &pos,
+                             const Eigen::Quaterniond &q_raw_in,
+                             const rclcpp::Time &stamp) {
   double dt = payload_ready_
-    ? (rclcpp::Time(msg->header.stamp) - last_payload_stamp_).seconds()
+    ? (stamp - last_payload_stamp_).seconds()
     : dt_nom_;
   if (dt <= 0.0) dt = dt_nom_;
 
-  Eigen::Vector3d meas(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
-  Eigen::Quaterniond q_raw = quat_from_msg(*msg);
-  // Enforce quaternion sign continuity for the DDP "direct subtraction" error.
-  // q and -q represent the same rotation, but subtraction is not sign-invariant.
-  // For your use-case the desired payload attitude is identity, so keep w >= 0
-  // to avoid the (-q) representation looking like a large error.
+  Eigen::Quaterniond q_raw = q_raw_in;
   if (q_raw.w() < 0.0) {
     q_raw.w() *= -1.0;
     q_raw.x() *= -1.0;
@@ -389,12 +650,13 @@ void GeomMultiliftRealflightNode::payload_pose_cb(const geometry_msgs::msg::Pose
       q_raw.z() *= -1.0;
     }
   }
+
+  Eigen::Vector3d meas = pos;
   Eigen::Quaterniond q_meas = q_raw;
   if (payload_enu_) {
     payload_q_enu_ = q_raw;
     meas = T_enu2ned_ * meas;
     Eigen::Matrix3d R_enu = q_raw.toRotationMatrix();
-    // Match px4_offboard/geom_multilift.py conversion: NED <- ENU using T_enu2ned on both sides.
     Eigen::Matrix3d R_ned = T_enu2ned_ * R_enu * T_body_;
     q_meas = Eigen::Quaterniond(R_ned);
   } else {
@@ -402,14 +664,14 @@ void GeomMultiliftRealflightNode::payload_pose_cb(const geometry_msgs::msg::Pose
     Eigen::Matrix3d R_enu = T_enu2ned_ * R_ned * T_body_;
     payload_q_enu_ = Eigen::Quaterniond(R_enu);
   }
+
   acc_filter_.step(meas, dt);
   payload_pos_ = acc_filter_.pos();
   payload_vel_ = acc_filter_.vel();
   payload_acc_ = acc_filter_.acc();
 
-  Eigen::Quaterniond q = q_meas;
   Eigen::Matrix3d R_prev = payload_R_;
-  Eigen::Matrix3d R_curr = q.toRotationMatrix();
+  Eigen::Matrix3d R_curr = q_meas.toRotationMatrix();
   Eigen::Matrix3d delta = R_prev.transpose() * R_curr;
   Eigen::AngleAxisd aa(delta);
   Eigen::Vector3d omega = aa.axis() * aa.angle() / dt;
@@ -422,15 +684,28 @@ void GeomMultiliftRealflightNode::payload_pose_cb(const geometry_msgs::msg::Pose
   }
   payload_omega_prev_ = omega;
   payload_omega_ = omega;
-  payload_q_ = q;
+  payload_q_ = q_meas;
   payload_R_ = R_curr;
 
-  last_payload_pose_ = *msg;
-  last_payload_stamp_ = msg->header.stamp;
+  last_payload_stamp_ = stamp;
   payload_ready_ = true;
+
+  if (use_payload_stamp_time_) {
+    update_sim_time(stamp);
+  }
 }
 
-void GeomMultiliftRealflightNode::odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
+void L2CNode::update_sim_time(const rclcpp::Time &stamp) {
+  sim_time_ = stamp.seconds();
+  if (last_sim_time_ > 0.0) {
+    sim_dt_ = std::max(1e-5, sim_time_ - last_sim_time_);
+  } else {
+    sim_dt_ = dt_nom_;
+  }
+  last_sim_time_ = sim_time_;
+}
+
+void L2CNode::odom_cb(const px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
   if (!std::isfinite(msg->q[0]) || !std::isfinite(msg->q[1]) ||
       !std::isfinite(msg->q[2]) || !std::isfinite(msg->q[3])) {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
@@ -460,7 +735,7 @@ void GeomMultiliftRealflightNode::odom_cb(const px4_msgs::msg::VehicleOdometry::
   odom_ready_ = true;
 }
 
-void GeomMultiliftRealflightNode::local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
+void L2CNode::local_pos_cb(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg) {
   last_local_xy_valid_ = msg->xy_valid;
   last_local_z_valid_ = msg->z_valid;
   last_local_vxy_valid_ = msg->v_xy_valid;
@@ -470,21 +745,6 @@ void GeomMultiliftRealflightNode::local_pos_cb(const px4_msgs::msg::VehicleLocal
   const bool z_finite = std::isfinite(msg->z);
   const bool xy_ok = msg->xy_valid || xy_finite;
   const bool z_ok = msg->z_valid || z_finite;
-
-  if (xy_ok) {
-    drone_pos_.x() = msg->x;
-    drone_pos_.y() = msg->y;
-  }
-  if (z_ok) {
-    drone_pos_.z() = msg->z;
-  }
-  if (xy_ok && z_ok) {
-    local_pos_ready_ = true;
-  } else {
-    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                         "VehicleLocalPosition invalid (xy_valid=%d z_valid=%d); holding last position",
-                         msg->xy_valid, msg->z_valid);
-  }
 
   // Use linear velocity/accel from estimator for cable dynamics compensation.
   const bool v_xy_finite = std::isfinite(msg->vx) && std::isfinite(msg->vy);
@@ -513,36 +773,164 @@ void GeomMultiliftRealflightNode::local_pos_cb(const px4_msgs::msg::VehicleLocal
     drone_acc_sp_ = drone_acc_est_;
     acc_sp_from_setpoint_ = false;
   }
+
+  if (apply_init_pos_offset_ && !init_pos_received_) {
+    local_pos_ready_ = false;
+    if (init_pos_sub_) {
+      RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                           "Waiting for init pose offset on %s", init_pos_sub_->get_topic_name());
+    }
+    return;
+  }
+
+  Eigen::Vector3d offset = local_pos_offset_ned_;
+  if (apply_init_pos_offset_) {
+    offset += init_pos_offset_ned_;
+  }
+  if (xy_ok) {
+    drone_pos_.x() = msg->x + offset.x();
+    drone_pos_.y() = msg->y + offset.y();
+  }
+  if (z_ok) {
+    drone_pos_.z() = msg->z + offset.z();
+  }
+  if (xy_ok && z_ok) {
+    local_pos_ready_ = true;
+  } else {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "VehicleLocalPosition invalid (xy_valid=%d z_valid=%d); holding last position",
+                         msg->xy_valid, msg->z_valid);
+  }
 }
 
-void GeomMultiliftRealflightNode::lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg) {
+void L2CNode::lps_setpoint_cb(const px4_msgs::msg::VehicleLocalPositionSetpoint::SharedPtr msg) {
   drone_acc_sp_ = Eigen::Vector3d(msg->acceleration[0], msg->acceleration[1], msg->acceleration[2]);
   last_acc_sp_stamp_ = this->now();
   acc_sp_valid_ = true;
   acc_sp_from_setpoint_ = true;
 }
 
-void GeomMultiliftRealflightNode::state_cb(const std_msgs::msg::Int32::SharedPtr msg) {
+void L2CNode::init_pose_cb(const geometry_msgs::msg::TransformStamped::SharedPtr msg) {
+  if (init_pos_received_) {
+    return;
+  }
+  Eigen::Vector3d init_enu(msg->transform.translation.x,
+                           msg->transform.translation.y,
+                           msg->transform.translation.z);
+  init_pos_offset_ned_ = T_enu2ned_ * init_enu;
+  init_pos_received_ = true;
+  RCLCPP_INFO(this->get_logger(), "Init pose offset (NED) set to [%.3f, %.3f, %.3f]",
+              init_pos_offset_ned_.x(), init_pos_offset_ned_.y(), init_pos_offset_ned_.z());
+}
+
+void L2CNode::state_cb(const std_msgs::msg::Int32::SharedPtr msg) {
   current_state_ = static_cast<FsmState>(msg->data);
   swarm_states_[drone_id_] = current_state_;
-  if (current_state_ == FsmState::TRAJ && !traj_started_ && !traj_completed_) {
-    // In real flight, a coordinator handles state sync; start immediately on TRAJ.
-    traj_started_ = true;
-    traj_time_init_ = false;
+  if (!use_internal_state_machine_) {
+    if (current_state_ == FsmState::TRAJ && !traj_started_ && !traj_completed_) {
+      traj_started_ = true;
+      traj_time_init_ = false;
+    }
   }
 }
 
-void GeomMultiliftRealflightNode::swarm_state_cb(const std_msgs::msg::Int32::SharedPtr msg, int other) {
+void L2CNode::swarm_state_cb(const std_msgs::msg::Int32::SharedPtr msg, int other) {
   swarm_states_[other] = static_cast<FsmState>(msg->data);
 }
 
-void GeomMultiliftRealflightNode::compute_desired(double t) {
+void L2CNode::check_state_internal(double t) {
+  std::vector<int> fs(total_drones_, static_cast<int>(FsmState::INIT));
+  for (int i = 0; i < total_drones_; ++i) {
+    auto it = swarm_states_.find(i);
+    if (it != swarm_states_.end()) {
+      fs[i] = static_cast<int>(it->second);
+    }
+  }
+
+  auto in_set = [](int v, std::initializer_list<int> vals) {
+    return std::find(vals.begin(), vals.end(), v) != vals.end();
+  };
+
+  bool ready = std::all_of(fs.begin(), fs.end(), [&](int v) { return in_set(v, {3, 4}); })
+    && std::any_of(fs.begin(), fs.end(), [](int v) { return v == 4; });
+  bool part_ready = std::all_of(fs.begin(), fs.end(), [&](int v) { return in_set(v, {3, 4, 5}); });
+  bool traj_ready_states = std::all_of(fs.begin(), fs.end(), [](int v) { return v == 5; });
+
+  std_msgs::msg::Int32 msg;
+  msg.data = static_cast<int>(FsmState::TRAJ);
+
+  if (!traj_ready_ && std::any_of(fs.begin(), fs.end(), [&](int v) {
+        return v == static_cast<int>(FsmState::ARMING) || v == static_cast<int>(FsmState::TAKEOFF);
+      })) {
+    ready_since_valid_ = false;
+    return;
+  }
+
+  if (!traj_ready_) {
+    if (ready) {
+      if (!ready_since_valid_) {
+        ready_since_ = t;
+        ready_since_valid_ = true;
+      }
+      if ((t - ready_since_) < initial_ready_delay_) {
+        return;
+      }
+      if (sim_t0_ == 0.0) {
+        sim_t0_ = t;
+      }
+      t_wait_traj_ = t - sim_t0_;
+      for (auto &pub : cmd_pubs_) {
+        pub->publish(msg);
+      }
+    } else {
+      ready_since_valid_ = false;
+    }
+  }
+
+  if (traj_ready_ && part_ready) {
+    for (size_t i = 0; i < cmd_pubs_.size(); ++i) {
+      if (fs[i] != static_cast<int>(FsmState::TRAJ)) {
+        cmd_pubs_[i]->publish(msg);
+      }
+    }
+  }
+
+  if (!traj_ready_ && (t_wait_traj_ > 5.0 || traj_ready_states)) {
+    RCLCPP_INFO(this->get_logger(), "All drones ready, start TRAJ at t=%.2f", t);
+    traj_ready_ = true;
+    traj_t0_ = t;
+    if (sim_t0_ == 0.0) {
+      sim_t0_ = t;
+    }
+    traj_done_bit_.assign(total_drones_, false);
+  }
+
+  if (traj_ready_ && !traj_done_ && (t - traj_t0_ >= traj_duration_)) {
+    std_msgs::msg::Int32 end_msg;
+    end_msg.data = static_cast<int>(FsmState::END_TRAJ);
+    for (size_t i = 0; i < cmd_pubs_.size(); ++i) {
+      if (fs[i] != static_cast<int>(FsmState::END_TRAJ)) {
+        cmd_pubs_[i]->publish(end_msg);
+        traj_done_bit_[i] = true;
+      }
+    }
+    if (std::all_of(traj_done_bit_.begin(), traj_done_bit_.end(),
+                    [](bool v){ return v; })) {
+      traj_done_ = true;
+    }
+  }
+}
+
+void L2CNode::compute_desired(double t) {
   const auto &payload = data_->payload();
   const auto &cables = data_->cables();
   int idx = std::min(static_cast<int>(std::round(t / (data_->dt() * slowdown_))),
-                     static_cast<int>(payload.size()) - 2);  // keep one-step margin
+                     static_cast<int>(payload.size()) - 2);
   int idx_k = std::min(idx, static_cast<int>(data_->kfb().size()) - 1);
-  double dt_des = (control_dt_ > 1e-6) ? control_dt_ : dt_nom_;
+  double dt_des = use_payload_stamp_time_ ? sim_dt_ : control_dt_;
+  if (dt_des <= 1e-6) {
+    dt_des = dt_nom_;
+  }
 
   auto p = payload[idx];
   Eigen::Vector3d x_d_enu = Eigen::Vector3d(p.pos.x(), p.pos.y(), p.pos.z());
@@ -551,9 +939,8 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
   x_d_ = T_enu2ned_ * x_d_enu;
   v_d_ = T_enu2ned_ * v_d_enu;
   a_d_ = T_enu2ned_ * a_d_enu;
-  R_d_ = T_body_ * Eigen::Matrix3d::Identity() * T_enu2ned_;  // keep body aligned
+  R_d_ = T_body_ * Eigen::Matrix3d::Identity() * T_enu2ned_;
 
-  // errors for DDP
   Eigen::Vector3d e_x_ENU = T_enu2ned_ * (payload_pos_ - x_d_);
   Eigen::Vector3d e_v_ENU = T_enu2ned_ * (payload_vel_ - v_d_);
   Eigen::Quaterniond q_d_enu(1.0, 0.0, 0.0, 0.0);
@@ -581,12 +968,9 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
   for (int i = 0; i < total_drones_; ++i) {
     const auto &c = cables[i][idx];
     Eigen::Vector3d dir_ned = T_enu2ned_ * c.dir;
-    // c.mu is already a tension magnitude in N (see preprocess_traj_new.py/plot_preprocess_traj_new.py),
-    // so do not scale by payload mass here (match SITL + Python controller).
     double mu_scalar = c.mu;
     mu_id_[i] = mu_scalar * dir_ned + payload_R_ * delta_mu.segment<3>(3 * i);
 
-    // derivative filters to match Python smoothing (mu affects q_id through normalization)
     if (!mu_history_init_[i]) {
       mu_id_prev_[i] = mu_id_[i];
       mu_id_dot_[i].setZero();
@@ -633,7 +1017,6 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
     q_id_dot_[i] = -proj * mu_id_dot_[i] / mu_norm;
     omega_id_[i] = q_id_[i].cross(q_id_dot_[i]);
 
-    // second derivative and desired cable angular acceleration
     double L = mu_norm;
     double L_dot = mu_id_[i].dot(mu_id_dot_[i]) / L;
     Eigen::Matrix3d proj_dot = - (q_id_dot_[i] * q_id_[i].transpose() + q_id_[i] * q_id_dot_[i].transpose());
@@ -646,19 +1029,14 @@ void GeomMultiliftRealflightNode::compute_desired(double t) {
   k_ddp_ = K;
 }
 
-void GeomMultiliftRealflightNode::run_control(double sim_t) {
+void L2CNode::run_control(double sim_t) {
   compute_desired(sim_t);
 
-  // payload terms
   Eigen::Matrix3d Omega_hat = hat(payload_omega_);
   Eigen::Matrix3d R_dot = payload_R_ * Omega_hat;
 
   Eigen::Vector3d g(0.0, 0.0, 9.81);
 
-  Eigen::Vector3d mu_vec = Eigen::Vector3d::Zero();
-  Eigen::Vector3d u_total = Eigen::Vector3d::Zero();
-
-  // compute cable dynamics for this drone only
   Eigen::Vector3d vec = -drone_pos_ + payload_pos_ + payload_R_ * rho_[drone_id_];
   const double vec_norm = vec.norm();
   last_vec_norm_ = vec_norm;
@@ -674,7 +1052,8 @@ void GeomMultiliftRealflightNode::run_control(double sim_t) {
   Eigen::Matrix3d q_hat = hat(q_i);
 
   Eigen::Vector3d mu_i = mu_id_[drone_id_].dot(q_i) * q_i;
-  Eigen::Vector3d a_i = payload_acc_ - g + payload_R_ * (Omega_hat * (Omega_hat * rho_[drone_id_])) - payload_R_ * hat(rho_[drone_id_]) * payload_omega_dot_;
+  Eigen::Vector3d a_i = payload_acc_ - g + payload_R_ * (Omega_hat * (Omega_hat * rho_[drone_id_])) -
+    payload_R_ * hat(rho_[drone_id_]) * payload_omega_dot_;
   Eigen::Vector3d omega_i = q_i.cross(q_i_dot);
   double omega_sq = omega_i.squaredNorm();
 
@@ -687,11 +1066,11 @@ void GeomMultiliftRealflightNode::run_control(double sim_t) {
     (-kq_ * e_qi - kw_ * e_omega_i - q_i.dot(omega_id_[drone_id_]) * q_i_dot - q_hat_sq * omega_id_dot_[drone_id_])
     - m_drones_ * q_hat_sq * a_i;
 
-  u_total = u_parallel + u_vertical;
+  Eigen::Vector3d u_total = u_parallel + u_vertical;
   last_u_total_norm_ = u_total.norm();
   log_sample(sim_t, q_i, omega_i, e_qi, e_omega_i);
+
   const uint64_t ts = this->get_clock()->now().nanoseconds() / 1000;
-  // Publish per-drone trajectory setpoint for visibility (matches traj_test PVA).
   px4_msgs::msg::TrajectorySetpoint traj;
   traj.timestamp = ts;
   const Eigen::Vector3d x_id =
@@ -717,7 +1096,6 @@ void GeomMultiliftRealflightNode::run_control(double sim_t) {
   }
 
   Eigen::Vector3d b3 = -u_total / u_total.norm();
-  // fuse with px4 accel setpoint and tilt-limit like Python px4_body_z
   Eigen::Vector3d body_z = px4_body_z_from_acc(drone_acc_sp_);
   Eigen::Vector3d blended = (1.0 - z_weight_) * body_z + z_weight_ * b3;
   if (blended.norm() < 1e-6) {
@@ -768,35 +1146,80 @@ void GeomMultiliftRealflightNode::run_control(double sim_t) {
   att_pub_->publish(att);
 }
 
-void GeomMultiliftRealflightNode::timer_cb() {
+void L2CNode::reset_trajectory_state() {
+  traj_started_ = false;
+  traj_time_init_ = false;
+  control_dt_init_ = false;
+  for (int i = 0; i < total_drones_; ++i) {
+    mu_history_init_[i] = false;
+    mu_dot_filter_init_[i] = false;
+    mu_ddot_filter_init_[i] = false;
+    mu_id_prev_[i].setZero();
+    mu_id_dot_[i].setZero();
+    mu_id_ddot_[i].setZero();
+    mu_id_dot_prev_[i].setZero();
+    mu_id_ddot_prev_[i].setZero();
+    q_id_dot_[i].setZero();
+    q_id_ddot_[i].setZero();
+  }
+}
+
+void L2CNode::publish_command(FsmState state, bool all_drones) {
+  std_msgs::msg::Int32 cmd;
+  cmd.data = static_cast<int>(state);
+  if (all_drones) {
+    for (auto &pub : cmd_pubs_) {
+      pub->publish(cmd);
+    }
+    return;
+  }
+  if (command_all_drones_) {
+    if (drone_id_ >= 0 && static_cast<size_t>(drone_id_) < cmd_pubs_.size()) {
+      cmd_pubs_[drone_id_]->publish(cmd);
+    }
+    return;
+  }
+  if (!cmd_pubs_.empty()) {
+    cmd_pubs_.front()->publish(cmd);
+  }
+}
+
+void L2CNode::timer_cb() {
   double sim_t_for_log = -1.0;
-  if (traj_time_init_) {
+  if (use_internal_state_machine_) {
+    sim_t_for_log = traj_ready_ ? std::max(0.0, sim_time_ - traj_t0_) : -1.0;
+  } else if (traj_time_init_) {
     sim_t_for_log = (this->now() - traj_start_).seconds();
   }
   log_debug(sim_t_for_log);
 
   if (!payload_ready_ || !odom_ready_ || !local_pos_ready_) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "Waiting for payload pose, PX4 odometry, and local position");
+                         "Waiting for payload, PX4 odometry, and local position");
+    return;
+  }
+
+  if (use_internal_state_machine_) {
+    check_state_internal(sim_time_);
+    if (!traj_ready_ || traj_done_) {
+      return;
+    }
+
+    double sim_t = std::max(0.0, sim_time_ - traj_t0_);
+    if (sim_t >= traj_duration_) {
+      if (!traj_done_) {
+        publish_command(FsmState::END_TRAJ, true);
+        traj_done_ = true;
+      }
+      return;
+    }
+
+    run_control(sim_t);
     return;
   }
 
   if (current_state_ != FsmState::TRAJ) {
-    traj_started_ = false;
-    traj_time_init_ = false;
-    control_dt_init_ = false;
-    for (int i = 0; i < total_drones_; ++i) {
-      mu_history_init_[i] = false;
-      mu_dot_filter_init_[i] = false;
-      mu_ddot_filter_init_[i] = false;
-      mu_id_prev_[i].setZero();
-      mu_id_dot_[i].setZero();
-      mu_id_ddot_[i].setZero();
-      mu_id_dot_prev_[i].setZero();
-      mu_id_ddot_prev_[i].setZero();
-      q_id_dot_[i].setZero();
-      q_id_ddot_[i].setZero();
-    }
+    reset_trajectory_state();
     return;
   }
 
@@ -832,9 +1255,9 @@ void GeomMultiliftRealflightNode::timer_cb() {
   if (sim_t >= traj_duration_) {
     if (!traj_completed_) {
       traj_completed_ = true;
-      std_msgs::msg::Int32 cmd;
-      cmd.data = static_cast<int>(FsmState::END_TRAJ);
-      for (int i = 0; i < 5; ++i) cmd_pub_->publish(cmd);
+      for (int i = 0; i < 5; ++i) {
+        publish_command(FsmState::END_TRAJ, false);
+      }
       RCLCPP_INFO(this->get_logger(), "Trajectory complete");
     }
     return;
@@ -843,7 +1266,7 @@ void GeomMultiliftRealflightNode::timer_cb() {
   run_control(sim_t);
 }
 
-void GeomMultiliftRealflightNode::log_debug(double sim_t) {
+void L2CNode::log_debug(double sim_t) {
   if (!debug_log_enabled_ || !debug_log_file_.is_open()) {
     return;
   }
@@ -854,6 +1277,7 @@ void GeomMultiliftRealflightNode::log_debug(double sim_t) {
   }
   last_debug_log_time_s_ = now_s;
 
+  const bool init_ready = apply_init_pos_offset_ ? init_pos_received_ : true;
   debug_log_file_ << std::fixed << std::setprecision(6)
                   << now_s << ","
                   << sim_t << ","
@@ -861,10 +1285,12 @@ void GeomMultiliftRealflightNode::log_debug(double sim_t) {
                   << payload_ready_ << ","
                   << odom_ready_ << ","
                   << local_pos_ready_ << ","
+                  << init_ready << ","
                   << last_local_xy_valid_ << ","
                   << last_local_z_valid_ << ","
                   << last_local_vxy_valid_ << ","
                   << last_local_vz_valid_ << ","
+                  << acc_sp_from_setpoint_ << ","
                   << drone_pos_.x() << ","
                   << drone_pos_.y() << ","
                   << drone_pos_.z() << ","
@@ -877,14 +1303,13 @@ void GeomMultiliftRealflightNode::log_debug(double sim_t) {
   debug_log_file_.flush();
 }
 
-void GeomMultiliftRealflightNode::log_sample(double sim_t,
-                                   const Eigen::Vector3d &q_i,
-                                   const Eigen::Vector3d &omega_i,
-                                   const Eigen::Vector3d &e_qi,
-                                   const Eigen::Vector3d &e_omega_i) {
+void L2CNode::log_sample(double sim_t,
+                         const Eigen::Vector3d &q_i,
+                         const Eigen::Vector3d &omega_i,
+                         const Eigen::Vector3d &e_qi,
+                         const Eigen::Vector3d &e_omega_i) {
   if (!log_enabled_ || !log_file_.is_open()) return;
 
-  // --- DDP error terms (match px4_offboard/geom_multilift.py) ---
   Eigen::Vector3d e_x_ned = payload_pos_ - x_d_;
   Eigen::Vector3d e_v_ned = payload_vel_ - v_d_;
   Eigen::Vector3d e_x_enu = T_enu2ned_ * e_x_ned;
@@ -900,8 +1325,6 @@ void GeomMultiliftRealflightNode::log_sample(double sim_t,
     while (a < -M_PI) a += 2.0 * M_PI;
     return a;
   };
-  // Use an explicit quaternion->RPY conversion to avoid Euler branch ambiguity
-  // (Eigen::eulerAngles may return the pi-shifted solution near identity).
   const double qw = payload_q_enu_.w();
   const double qx = payload_q_enu_.x();
   const double qy = payload_q_enu_.y();
@@ -947,7 +1370,6 @@ void GeomMultiliftRealflightNode::log_sample(double sim_t,
     P_.transpose() * (P_ * P_.transpose()).inverse() * FM_frd;
   Eigen::Vector3d delta_mu_self = delta_mu.segment<3>(3 * drone_id_);
 
-  // --- Cable terms ---
   Eigen::Vector3d q_diff = q_id_[drone_id_] - q_i;
   Eigen::Vector3d omega_diff = omega_i - omega_id_[drone_id_];
 
