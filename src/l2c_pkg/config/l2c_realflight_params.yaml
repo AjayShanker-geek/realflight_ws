@@ -13,7 +13,7 @@
     l: 1.0
     payload_mass: 0.15
     payload_added_mass: 0.1
-    payload_rp: [0.07, 0.0, 0.0]
+    payload_rp: [0.0, 0.07, 0.0]
     payload_radius: 0.125
     apply_payload_offset: false
     kq: 9.5
@@ -25,4 +25,4 @@
     payload_is_enu: true
     enable_log: true
     enable_debug_log: true
-    log_path: ""
+    log_path: "realflight_logs"

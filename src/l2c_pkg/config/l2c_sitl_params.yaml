@@ -14,7 +14,7 @@
     l: 1.0
     payload_mass: 0.150
     payload_added_mass: 0.10
-    payload_rp: [0.07, 0.0, 0.0]
+    payload_rp: [0.0, 0.07, 0.0]
     payload_radius: 0.125
     apply_payload_offset: false
     apply_init_pose_offset: false
