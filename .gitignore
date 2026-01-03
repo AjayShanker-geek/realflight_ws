@@ -22,3 +22,6 @@ raw_data/
 # logs
 *log
 
+# unused packages
+src/geom_multilift/
+src/l2c_pkg/

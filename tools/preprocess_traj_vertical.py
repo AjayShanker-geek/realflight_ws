@@ -10,6 +10,7 @@ Column naming follows tools/save_traj_vertical.py.
 import argparse
 import csv
 import math
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -18,12 +19,51 @@ import numpy as np
 
 FILE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FILE_DIR.parent
+CONFIG_PATH = FILE_DIR / "preprocess_traj_vertical.yaml"
 SCENARIO_DIR = (
     REPO_ROOT
     / "raw_data"
     / "3quad_traj"
     / "Planning_plots_multiagent_meta_evaluation_COM_Dyn_V(m2=0.1,rg=[0.022,0.016])"
 )
+
+
+def read_config(config_path: Path) -> dict:
+    if not config_path.exists():
+        return {}
+    config = {}
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = re.match(r"^([A-Za-z0-9_]+)\s*:\s*(.+)$", line)
+        if match:
+            key = match.group(1)
+            value = match.group(2).strip().strip("\"'")
+            config[key] = value
+    return config
+
+
+def _parse_float(config: dict, key: str) -> Optional[float]:
+    value = config.get(key)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_bool(config: dict, key: str, default: bool = False) -> bool:
+    value = config.get(key)
+    if value is None:
+        return default
+    val = str(value).strip().lower()
+    if val in ("1", "true", "yes", "y", "on"):
+        return True
+    if val in ("0", "false", "no", "n", "off"):
+        return False
+    return default
 
 
 class DataLoaderVertical:
@@ -46,6 +86,22 @@ class DataLoaderVertical:
         self.cable_length = 1.0
         self.g = 9.81
         self.ez = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
+        self.payload_attitude_identity = False
+
+        config = read_config(CONFIG_PATH)
+        dt_val = _parse_float(config, "dt")
+        if dt_val is not None:
+            self.dt = dt_val
+        cl0_val = _parse_float(config, "cl0")
+        if cl0_val is not None:
+            self.cable_length = cl0_val
+        payload_radius_val = _parse_float(config, "payload_radius")
+        rl_val = _parse_float(config, "rl")
+        self.payload_attitude_identity = _parse_bool(config, "payload_attitude_identity", False)
+        if payload_radius_val is not None:
+            self.rl = payload_radius_val
+        elif rl_val is not None:
+            self.rl = rl_val
 
         self.xl_traj = np.load(self.path / "xl_traj_0_3_a_3.npy", allow_pickle=True)
         self.payload_x = self.xl_traj[:, 0:3]
@@ -81,6 +137,9 @@ class TrajectoryConverterVertical:
         self.target_dt = target_dt
         self.window = window
         self.order = order
+        self._fact = [math.factorial(i) for i in range(self.order + 1)]
+        self._c5_inv = self._build_c5_inv()
+        self.payload_attitude_identity = self.loader.payload_attitude_identity
         self.rl = self.loader.rl
         self.cable_length = self.loader.cable_length
         self.alpha = self.loader.alpha
@@ -114,13 +173,44 @@ class TrajectoryConverterVertical:
             pos_enu[i] = payload_enu + ri[i] + self.cable_length * cable_dir_enu[i]
         return pos_enu
 
-    @staticmethod
-    def compute_velocities(pos: np.ndarray, dt: float) -> np.ndarray:
-        return np.gradient(pos, dt, axis=1)
+    def compute_drone_kinematics(
+        self,
+        payload_pos: np.ndarray,
+        payload_vel: np.ndarray,
+        payload_acc: np.ndarray,
+        payload_q: np.ndarray,
+        payload_omega: np.ndarray,
+        payload_omega_dot: np.ndarray,
+        cable_dir: np.ndarray,
+        cable_omega: np.ndarray,
+        cable_omega_dot: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        r_attach_body = np.array(
+            [
+                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
+                for i in range(self.num_drones)
+            ]
+        )
+        rot = self.quat_to_rotmat(payload_q)
+        r_attach_world = np.einsum("tij,dj->tdi", rot, r_attach_body)
+        r_attach_world = np.transpose(r_attach_world, (1, 0, 2))
 
-    @staticmethod
-    def compute_accelerations(vel: np.ndarray, dt: float) -> np.ndarray:
-        return np.gradient(vel, dt, axis=1)
+        omega_world = np.einsum("tij,tj->ti", rot, payload_omega)
+        omega_dot_world = np.einsum("tij,tj->ti", rot, payload_omega_dot)
+
+        qdot = np.cross(cable_omega, cable_dir, axis=2)
+        qddot = np.cross(cable_omega_dot, cable_dir, axis=2) + np.cross(cable_omega, qdot, axis=2)
+
+        omega_world_b = omega_world[None, :, :]
+        omega_dot_world_b = omega_dot_world[None, :, :]
+        omega_cross_r = np.cross(omega_world_b, r_attach_world, axis=2)
+        omega_cross_omega_cross_r = np.cross(omega_world_b, omega_cross_r, axis=2)
+        omega_dot_cross_r = np.cross(omega_dot_world_b, r_attach_world, axis=2)
+
+        pos = payload_pos[None, :, :] + r_attach_world + self.cable_length * cable_dir
+        vel = payload_vel[None, :, :] + omega_cross_r + self.cable_length * qdot
+        acc = payload_acc[None, :, :] + omega_dot_cross_r + omega_cross_omega_cross_r + self.cable_length * qddot
+        return pos, vel, acc
 
     @staticmethod
     def normalize_vectors(vecs: np.ndarray) -> np.ndarray:
@@ -177,6 +267,147 @@ class TrajectoryConverterVertical:
                     acc_out[i, idx_t, axis] = acc_val
                     jerk_out[i, idx_t, axis] = jerk_val
                     snap_out[i, idx_t, axis] = snap_val
+
+        return pos_out, vel_out, acc_out, jerk_out, snap_out
+
+    @staticmethod
+    def _build_c5_inv() -> np.ndarray:
+        order = 11
+        size = order + 1
+        mat = np.zeros((size, size), dtype=float)
+        for k in range(6):
+            mat[k, k] = math.factorial(k)
+        for k in range(6):
+            row = 6 + k
+            for m in range(k, order + 1):
+                mat[row, m] = math.factorial(m) / math.factorial(m - k)
+        return np.linalg.inv(mat)
+
+    def estimate_derivatives_raw(
+        self,
+        series_raw: np.ndarray,
+        time_raw: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        num_tracks, _, _ = series_raw.shape
+        pos_out = np.zeros((num_tracks, len(time_raw), 3))
+        vel_out = np.zeros_like(pos_out)
+        acc_out = np.zeros_like(pos_out)
+        jerk_out = np.zeros_like(pos_out)
+        snap_out = np.zeros_like(pos_out)
+        crackle_out = np.zeros_like(pos_out)
+
+        half_w = self.window // 2
+        for i in range(num_tracks):
+            for axis in range(3):
+                values = series_raw[i, :, axis]
+                for idx_t, t in enumerate(time_raw):
+                    raw_idx = idx_t
+                    center = raw_idx
+                    start = max(0, center - half_w)
+                    end = min(len(time_raw), start + self.window)
+                    start = max(0, end - self.window)
+                    t_win = time_raw[start:end]
+                    v_win = values[start:end]
+                    order_fit = min(self.order, len(t_win) - 1)
+                    if order_fit < 1:
+                        pos_out[i, idx_t, axis] = values[raw_idx]
+                        continue
+                    t_shift = t_win - t
+                    coeffs = np.polyfit(t_shift, v_win, order_fit)
+                    pos_out[i, idx_t, axis] = values[raw_idx]
+                    vel_out[i, idx_t, axis] = np.polyval(np.polyder(coeffs, 1), 0.0) if order_fit >= 1 else 0.0
+                    acc_out[i, idx_t, axis] = np.polyval(np.polyder(coeffs, 2), 0.0) if order_fit >= 2 else 0.0
+                    jerk_out[i, idx_t, axis] = np.polyval(np.polyder(coeffs, 3), 0.0) if order_fit >= 3 else 0.0
+                    snap_out[i, idx_t, axis] = np.polyval(np.polyder(coeffs, 4), 0.0) if order_fit >= 4 else 0.0
+                    crackle_out[i, idx_t, axis] = np.polyval(np.polyder(coeffs, 5), 0.0) if order_fit >= 5 else 0.0
+
+        return pos_out, vel_out, acc_out, jerk_out, snap_out, crackle_out
+
+    def resample_piecewise_c5(
+        self,
+        series_raw: np.ndarray,
+        time_raw: np.ndarray,
+        time_dense: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        (
+            pos_raw,
+            vel_raw,
+            acc_raw,
+            jerk_raw,
+            snap_raw,
+            crackle_raw,
+        ) = self.estimate_derivatives_raw(series_raw, time_raw)
+
+        num_tracks, _, _ = series_raw.shape
+        pos_out = np.zeros((num_tracks, len(time_dense), 3))
+        vel_out = np.zeros_like(pos_out)
+        acc_out = np.zeros_like(pos_out)
+        jerk_out = np.zeros_like(pos_out)
+        snap_out = np.zeros_like(pos_out)
+
+        for seg in range(len(time_raw) - 1):
+            t0 = time_raw[seg]
+            t1 = time_raw[seg + 1]
+            h = t1 - t0
+            if h <= 0.0:
+                continue
+            idx_start = int(np.searchsorted(time_dense, t0, side="left"))
+            if seg == len(time_raw) - 2:
+                idx_end = int(np.searchsorted(time_dense, t1, side="right"))
+            else:
+                idx_end = int(np.searchsorted(time_dense, t1, side="left"))
+            if idx_end <= idx_start:
+                continue
+
+            tau = (time_dense[idx_start:idx_end] - t0) / h
+            tau_powers = np.vstack([tau ** k for k in range(12)])
+            tau_powers1 = tau_powers[:-1]
+            tau_powers2 = tau_powers[:-2]
+            tau_powers3 = tau_powers[:-3]
+            tau_powers4 = tau_powers[:-4]
+
+            d0 = np.stack([pos_raw[:, seg, :],
+                           vel_raw[:, seg, :],
+                           acc_raw[:, seg, :],
+                           jerk_raw[:, seg, :],
+                           snap_raw[:, seg, :],
+                           crackle_raw[:, seg, :]], axis=-1)
+            d1 = np.stack([pos_raw[:, seg + 1, :],
+                           vel_raw[:, seg + 1, :],
+                           acc_raw[:, seg + 1, :],
+                           jerk_raw[:, seg + 1, :],
+                           snap_raw[:, seg + 1, :],
+                           crackle_raw[:, seg + 1, :]], axis=-1)
+            scale = np.array([1.0, h, h ** 2, h ** 3, h ** 4, h ** 5], dtype=float)
+            b0 = d0 * scale
+            b1 = d1 * scale
+            b = np.concatenate([b0, b1], axis=-1)
+            coeff = np.tensordot(b, self._c5_inv.T, axes=([2], [0]))
+
+            c1 = np.zeros((num_tracks, 3, 11))
+            c2 = np.zeros((num_tracks, 3, 10))
+            c3 = np.zeros((num_tracks, 3, 9))
+            c4 = np.zeros((num_tracks, 3, 8))
+            for m in range(1, 12):
+                c1[..., m - 1] = m * coeff[..., m]
+            for m in range(2, 12):
+                c2[..., m - 2] = m * (m - 1) * coeff[..., m]
+            for m in range(3, 12):
+                c3[..., m - 3] = m * (m - 1) * (m - 2) * coeff[..., m]
+            for m in range(4, 12):
+                c4[..., m - 4] = m * (m - 1) * (m - 2) * (m - 3) * coeff[..., m]
+
+            pos_seg = np.tensordot(coeff, tau_powers, axes=([2], [0]))
+            vel_seg = np.tensordot(c1, tau_powers1, axes=([2], [0])) / h
+            acc_seg = np.tensordot(c2, tau_powers2, axes=([2], [0])) / (h ** 2)
+            jerk_seg = np.tensordot(c3, tau_powers3, axes=([2], [0])) / (h ** 3)
+            snap_seg = np.tensordot(c4, tau_powers4, axes=([2], [0])) / (h ** 4)
+
+            pos_out[:, idx_start:idx_end, :] = np.transpose(pos_seg, (0, 2, 1))
+            vel_out[:, idx_start:idx_end, :] = np.transpose(vel_seg, (0, 2, 1))
+            acc_out[:, idx_start:idx_end, :] = np.transpose(acc_seg, (0, 2, 1))
+            jerk_out[:, idx_start:idx_end, :] = np.transpose(jerk_seg, (0, 2, 1))
+            snap_out[:, idx_start:idx_end, :] = np.transpose(snap_seg, (0, 2, 1))
 
         return pos_out, vel_out, acc_out, jerk_out, snap_out
 
@@ -243,6 +474,22 @@ class TrajectoryConverterVertical:
             w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
             w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
         ])
+
+    @staticmethod
+    def quat_to_rotmat(q: np.ndarray) -> np.ndarray:
+        q = q / np.clip(np.linalg.norm(q, axis=1, keepdims=True), 1e-9, None)
+        w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+        rot = np.empty((q.shape[0], 3, 3))
+        rot[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+        rot[:, 0, 1] = 2.0 * (x * y - z * w)
+        rot[:, 0, 2] = 2.0 * (x * z + y * w)
+        rot[:, 1, 0] = 2.0 * (x * y + z * w)
+        rot[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+        rot[:, 1, 2] = 2.0 * (y * z - x * w)
+        rot[:, 2, 0] = 2.0 * (x * z - y * w)
+        rot[:, 2, 1] = 2.0 * (y * z + x * w)
+        rot[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+        return rot
 
     def quat_inverse(self, q: np.ndarray) -> np.ndarray:
         q = self.quat_normalize(q)
@@ -481,7 +728,15 @@ class TrajectoryConverterVertical:
                     norm_xb = 1.0
                 x_b /= norm_xb
                 y_b = np.cross(z_b, x_b)
-                y_b /= np.linalg.norm(y_b)
+                norm_yb = np.linalg.norm(y_b)
+                if norm_yb < 1e-6:
+                    fallback = x_c if abs(np.dot(z_b, x_c)) < 0.9 else y_c
+                    y_b = np.cross(z_b, fallback)
+                    norm_yb = np.linalg.norm(y_b)
+                    if norm_yb < 1e-6:
+                        y_b = np.array([0.0, 1.0, 0.0])
+                        norm_yb = 1.0
+                y_b /= norm_yb
                 R = np.column_stack((x_b, y_b, z_b))
 
                 roll[i, k] = np.arctan2(R[2, 1], R[2, 2])
@@ -637,51 +892,27 @@ class TrajectoryConverterVertical:
         time_dense_end = time_raw[-1]
         time_dense = np.arange(0.0, time_dense_end + self.target_dt / 2.0, self.target_dt)
 
-        # Per-drone trajectories (NED)
-        pos_raw_enu = self.compute_positions()
+        payload_pos_raw_full = self.loader.payload_x
+        payload_vel_raw_full = self.loader.payload_v
+        payload_q_raw = self.loader.payload_q
+        payload_w_raw_full = self.loader.payload_w
+        payload_acc_raw = np.gradient(payload_vel_raw_full, self.dt, axis=0, edge_order=2)
+        payload_w_dot_raw = np.gradient(payload_w_raw_full, self.dt, axis=0, edge_order=2)
 
-        (
-            pos_smooth_enu,
-            vel_smooth_enu,
-            acc_smooth_enu,
-            jerk_smooth_enu,
-            snap_smooth_enu,
-        ) = self.resample_polynomial(pos_raw_enu, time_raw, time_dense)
-
-        pos_smooth = self.enu_to_ned(pos_smooth_enu)
-        vel_smooth = self.enu_to_ned(vel_smooth_enu)
-        acc_smooth = self.enu_to_ned(acc_smooth_enu)
-        jerk_smooth = self.enu_to_ned(jerk_smooth_enu)
-        snap_smooth = self.enu_to_ned(snap_smooth_enu)
-
-        roll, pitch, yaw, p_rates, q_rates, r_rates = self.compute_attitude_and_body_rates(
-            acc_smooth, jerk_smooth
-        )
-        self.save_drone_csv(
-            pos_smooth,
-            vel_smooth,
-            time_dense,
-            suffix="smoothed_100hz",
-            accel=acc_smooth,
-            jerk=jerk_smooth,
-            snap=snap_smooth,
-            roll=roll,
-            pitch=pitch,
-            yaw=yaw,
-            p_rates=p_rates,
-            q_rates=q_rates,
-            r_rates=r_rates,
-        )
+        if self.payload_attitude_identity:
+            payload_q_raw = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (payload_pos_raw_full.shape[0], 1))
+            payload_w_raw_full = np.zeros_like(payload_w_raw_full)
+            payload_w_dot_raw = np.zeros_like(payload_w_dot_raw)
 
         # Payload trajectory (ENU) for geometric controller
-        payload_pos_raw = self.loader.payload_x.reshape(1, -1, 3)
+        payload_pos_raw = payload_pos_raw_full.reshape(1, -1, 3)
         (
             payload_pos_s,
             payload_vel_s,
             payload_acc_s,
             payload_jerk_s,
             payload_snap_s,
-        ) = self.resample_polynomial(payload_pos_raw, time_raw, time_dense)
+        ) = self.resample_piecewise_c5(payload_pos_raw, time_raw, time_dense)
 
         payload_pos_s = payload_pos_s[0]
         payload_vel_s = payload_vel_s[0]
@@ -689,9 +920,17 @@ class TrajectoryConverterVertical:
         payload_jerk_s = payload_jerk_s[0]
         payload_snap_s = payload_snap_s[0]
 
-        payload_q_s = self.resample_quaternion(self.loader.payload_q, time_raw, time_dense)
-        payload_w_raw = self.loader.payload_w.reshape(1, -1, 3)
-        payload_w_s = self.resample_polynomial_series(payload_w_raw, time_raw, time_dense)[0]
+        payload_q_s = self.resample_quaternion(payload_q_raw, time_raw, time_dense)
+        payload_w_raw = payload_w_raw_full.reshape(1, -1, 3)
+        payload_w_s, payload_w_dot_s, _, _, _ = self.resample_polynomial(
+            payload_w_raw, time_raw, time_dense
+        )
+        payload_w_s = payload_w_s[0]
+        payload_w_dot_s = payload_w_dot_s[0]
+        if self.payload_attitude_identity:
+            payload_q_s = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(time_dense), 1))
+            payload_w_s = np.zeros_like(payload_w_s)
+            payload_w_dot_s = np.zeros_like(payload_w_dot_s)
 
         self.save_payload_csv(
             time_dense,
@@ -721,6 +960,80 @@ class TrajectoryConverterVertical:
             cable_omega_s,
             cable_omega_dot_s,
             cable_mu_s,
+        )
+
+        # Per-drone trajectories (NED) via analytic kinematics at raw rate + C5 resample
+        drone_pos_raw, _, _ = self.compute_drone_kinematics(
+            payload_pos_raw_full,
+            payload_vel_raw_full,
+            payload_acc_raw,
+            payload_q_raw,
+            payload_w_raw_full,
+            payload_w_dot_raw,
+            cable_dir_raw,
+            self.loader.cable_omega,
+            self.loader.cable_omega_dot,
+        )
+        (
+            pos_smooth_enu,
+            vel_smooth_enu,
+            acc_smooth_enu,
+            jerk_smooth_enu,
+            snap_smooth_enu,
+        ) = self.resample_piecewise_c5(drone_pos_raw, time_raw, time_dense)
+
+        pos_smooth = self.enu_to_ned(pos_smooth_enu)
+        vel_smooth = self.enu_to_ned(vel_smooth_enu)
+        acc_smooth = self.enu_to_ned(acc_smooth_enu)
+        jerk_smooth = self.enu_to_ned(jerk_smooth_enu)
+        snap_smooth = self.enu_to_ned(snap_smooth_enu)
+
+        roll, pitch, yaw, p_rates, q_rates, r_rates = self.compute_attitude_and_body_rates(
+            acc_smooth, jerk_smooth
+        )
+        self.save_drone_csv(
+            pos_smooth,
+            vel_smooth,
+            time_dense,
+            suffix="smoothed_100hz",
+            accel=acc_smooth,
+            jerk=jerk_smooth,
+            snap=snap_smooth,
+            roll=roll,
+            pitch=pitch,
+            yaw=yaw,
+            p_rates=p_rates,
+            q_rates=q_rates,
+            r_rates=r_rates,
+        )
+
+        vel_diff_enu = np.gradient(pos_smooth_enu, self.target_dt, axis=1)
+        acc_diff_enu = np.gradient(vel_diff_enu, self.target_dt, axis=1)
+        jerk_diff_enu = np.gradient(acc_diff_enu, self.target_dt, axis=1)
+        snap_diff_enu = np.gradient(jerk_diff_enu, self.target_dt, axis=1)
+
+        vel_diff = self.enu_to_ned(vel_diff_enu)
+        acc_diff = self.enu_to_ned(acc_diff_enu)
+        jerk_diff = self.enu_to_ned(jerk_diff_enu)
+        snap_diff = self.enu_to_ned(snap_diff_enu)
+
+        roll_d, pitch_d, yaw_d, p_d, q_d, r_d = self.compute_attitude_and_body_rates(
+            acc_diff, jerk_diff
+        )
+        self.save_drone_csv(
+            pos_smooth,
+            vel_diff,
+            time_dense,
+            suffix="smoothed_100hz_diff",
+            accel=acc_diff,
+            jerk=jerk_diff,
+            snap=snap_diff,
+            roll=roll_d,
+            pitch=pitch_d,
+            yaw=yaw_d,
+            p_rates=p_d,
+            q_rates=q_d,
+            r_rates=r_d,
         )
 
         # Kfb gains (upsampled to match time_dense)
@@ -797,7 +1110,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    config = read_config(CONFIG_PATH)
     scenario_dir = resolve_scenario_dir(args.base_dir)
+    if args.base_dir is None:
+        config_base = config.get("base_dir")
+        if config_base:
+            scenario_dir = resolve_scenario_dir(config_base)
     output_dir = args.output_dir
     if output_dir is None:
         base = Path("data/realflight_traj_vertical")
