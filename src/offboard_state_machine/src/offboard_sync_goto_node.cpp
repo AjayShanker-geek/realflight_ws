@@ -346,7 +346,7 @@ void OffboardSyncGoto::publish_offboard_mode()
     m.position     = true;
     m.velocity     = true;
     m.acceleration = true;
-    m.attitude     = true;
+    m.attitude     = false;
     m.body_rate    = false;
   } else if (has_active_seg) {
     m.position     = true;
