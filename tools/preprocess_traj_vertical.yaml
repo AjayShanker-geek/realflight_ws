@@ -1,0 +1,4 @@
+base_dir: "raw_data/Planning_plots_multiagent_meta_evaluation_COM_Dyn_V (m2=0.1,rg=[0.03,0],4.6rq)"
+cl0: 1.0
+payload_radius: 0.125
+payload_attitude_identity: false
