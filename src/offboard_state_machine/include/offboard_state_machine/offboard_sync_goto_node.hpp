@@ -111,6 +111,8 @@ private:
   double takeoff_x_, takeoff_y_, takeoff_z_;
   double hover_x_, hover_y_, hover_z_;
   double goto_x_, goto_y_, goto_z_;
+  double end_traj_x_{0.0}, end_traj_y_{0.0}, end_traj_z_{0.0};
+  double land_x_{0.0}, land_y_{0.0};
 
   uint8_t nav_state_;
   uint8_t arming_state_;

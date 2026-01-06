@@ -379,7 +379,8 @@ void OffboardFSM::start_mjerk_segment(const Eigen::Vector3d& p_target,
     p0.z() = 0.0;
   }
   
-  Eigen::Vector3d v0 = vel_initialized_ ? current_vel_ : Eigen::Vector3d::Zero();
+  // Position-only minimum jerk keeps a straight-line path in 3D.
+  Eigen::Vector3d v0 = Eigen::Vector3d::Zero();
   Eigen::Vector3d a0 = Eigen::Vector3d::Zero();
   
   // Use override if provided (positive value), otherwise use goto_max_vel_
@@ -648,7 +649,7 @@ void OffboardFSM::timer_cb()
       Eigen::Vector3d p_start(current_x_, current_y_, current_z_);
       Eigen::Vector3d p_target(takeoff_pos_x_, takeoff_pos_y_, -takeoff_alt_);
       double optimal_duration = calculate_optimal_duration(
-          p_start, p_target, current_vel_, goto_max_vel_);
+          p_start, p_target, Eigen::Vector3d::Zero(), goto_max_vel_);
       
       double actual_duration = std::max(optimal_duration, takeoff_time_s_);
       start_mjerk_segment(p_target, actual_duration);
@@ -696,7 +697,7 @@ void OffboardFSM::timer_cb()
             Eigen::Vector3d p_target(goto_x_, goto_y_, goto_z_);
             
             double duration = calculate_optimal_duration(
-                p_start, p_target, current_vel_, goto_max_vel_);
+                p_start, p_target, Eigen::Vector3d::Zero(), goto_max_vel_);
             
             start_mjerk_segment(p_target, duration);
             

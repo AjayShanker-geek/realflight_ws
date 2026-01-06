@@ -68,7 +68,10 @@ private:
                   const CablePoint &cable,
                   double acc_x,
                   double acc_y,
-                  double acc_z);
+                  double acc_z,
+                  double ff_acc_x,
+                  double ff_acc_y,
+                  double ff_acc_z);
   void debug_log_sample(double now_s);
   void send_state_command(int state);
 

@@ -4,6 +4,7 @@
     payload_input: "odom"
     use_payload_stamp_time: true
     data_root: "data/realflight_traj_new_H (m2=0.1,rg=[0,0.028])"
+    # data_root: "data/realflight_traj_vertical_V (m2=0.1,rg=[0.03,0],4.6rq)"
     use_raw_traj: false
     trajectory_csv: ""
     cable_csv: ""
@@ -12,9 +13,10 @@
     payload_mass: 0.150
     payload_added_mass: 0.10
     payload_rp: [0.0, 0.07, 0.0]
+    # payload_rp: [0.07, 0.0, 0.0]
     payload_radius: 0.125
     feedforward_weight: 1.0
-    feedback_weight: 1.0
+    feedback_weight: 0.0
     yaw_setpoint: 3.141592653589793
     payload_is_enu: true
     enable_log: true

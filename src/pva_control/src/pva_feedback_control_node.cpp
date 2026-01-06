@@ -434,7 +434,9 @@ PvaFeedbackControlNode::PvaFeedbackControlNode(int drone_id, int total_drones)
     log_file_.open(log_path, std::ios::out | std::ios::trunc);
     if (log_file_.is_open()) {
       log_file_ << "t,traj_t,state,sp_x,sp_y,sp_z,sp_vx,sp_vy,sp_vz,"
-                << "acc_x,acc_y,acc_z,mu_ff_x,mu_ff_y,mu_ff_z,mu_fb_x,mu_fb_y,mu_fb_z,"
+                << "acc_x,acc_y,acc_z,acc_dir_x,acc_dir_y,acc_dir_z,"
+                << "ff_acc_x,ff_acc_y,ff_acc_z,"
+                << "mu_ff_x,mu_ff_y,mu_ff_z,mu_fb_x,mu_fb_y,mu_fb_z,"
                 << "payload_x_enu,payload_y_enu,payload_z_enu,payload_vx_enu,payload_vy_enu,payload_vz_enu,"
                 << "payload_des_x,payload_des_y,payload_des_z,ex_enu_x,ex_enu_y,ex_enu_z,"
                 << "ev_enu_x,ev_enu_y,ev_enu_z\n";
@@ -1365,6 +1367,23 @@ void PvaFeedbackControlNode::log_sample(double now_s,
   if (!log_enabled_ || !log_file_.is_open()) {
     return;
   }
+  double acc_norm = acc_cmd.norm();
+  double acc_dir_x = 0.0;
+  double acc_dir_y = 0.0;
+  double acc_dir_z = 0.0;
+  if (acc_norm > 1e-6) {
+    acc_dir_x = acc_cmd.x() / acc_norm;
+    acc_dir_y = acc_cmd.y() / acc_norm;
+    acc_dir_z = acc_cmd.z() / acc_norm;
+  }
+  double ff_acc_x = 0.0;
+  double ff_acc_y = 0.0;
+  double ff_acc_z = 0.0;
+  if (drone_mass_ > 1e-9) {
+    ff_acc_x = mu_ff.x() / drone_mass_;
+    ff_acc_y = mu_ff.y() / drone_mass_;
+    ff_acc_z = mu_ff.z() / drone_mass_;
+  }
   log_file_ << std::fixed << std::setprecision(6)
             << now_s << ","
             << traj.time << ","
@@ -1372,6 +1391,8 @@ void PvaFeedbackControlNode::log_sample(double now_s,
             << traj.x << "," << traj.y << "," << traj.z << ","
             << traj.vx << "," << traj.vy << "," << traj.vz << ","
             << acc_cmd.x() << "," << acc_cmd.y() << "," << acc_cmd.z() << ","
+            << acc_dir_x << "," << acc_dir_y << "," << acc_dir_z << ","
+            << ff_acc_x << "," << ff_acc_y << "," << ff_acc_z << ","
             << mu_ff.x() << "," << mu_ff.y() << "," << mu_ff.z() << ","
             << mu_fb.x() << "," << mu_fb.y() << "," << mu_fb.z() << ","
             << payload_pos_enu.x() << "," << payload_pos_enu.y() << "," << payload_pos_enu.z() << ","
