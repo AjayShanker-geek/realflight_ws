@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -261,7 +262,9 @@ PvaControlNode::PvaControlNode(int drone_id, int total_drones)
     log_file_.open(log_path, std::ios::out | std::ios::trunc);
     if (log_file_.is_open()) {
       log_file_ << "t,traj_t,state,sp_x,sp_y,sp_z,sp_vx,sp_vy,sp_vz,"
-                << "acc_x,acc_y,acc_z,cable_dir_x,cable_dir_y,cable_dir_z,"
+                << "acc_x,acc_y,acc_z,acc_dir_x,acc_dir_y,acc_dir_z,"
+                << "ff_acc_x,ff_acc_y,ff_acc_z,"
+                << "cable_dir_x,cable_dir_y,cable_dir_z,"
                 << "cable_mu,odom_x,odom_y,odom_z\n";
       log_enabled_ = true;
       RCLCPP_INFO(this->get_logger(), "Logging enabled: %s", log_path.c_str());
@@ -443,9 +446,13 @@ bool PvaControlNode::load_cable_from_csv(const std::string &filepath)
     CablePoint point{};
     try {
       point.time = read_value(cols, idx, "time", 0.0);
-      point.dir_x = read_value(cols, idx, "dir_x", 0.0);
-      point.dir_y = read_value(cols, idx, "dir_y", 0.0);
-      point.dir_z = read_value(cols, idx, "dir_z", 0.0);
+      double dir_x_enu = read_value(cols, idx, "dir_x", 0.0);
+      double dir_y_enu = read_value(cols, idx, "dir_y", 0.0);
+      double dir_z_enu = read_value(cols, idx, "dir_z", 0.0);
+      // Cable directions are stored in ENU; convert to NED to match trajectory.
+      point.dir_x = dir_y_enu;
+      point.dir_y = dir_x_enu;
+      point.dir_z = -dir_z_enu;
       point.mu = read_value(cols, idx, "mu", 0.0);
     } catch (const std::exception &e) {
       RCLCPP_WARN(this->get_logger(), "Skipping cable line: %s", line.c_str());
@@ -709,16 +716,26 @@ void PvaControlNode::publish_trajectory_setpoint(
   double ax = traj.ax;
   double ay = traj.ay;
   double az = traj.az;
+  double ff_ax = 0.0;
+  double ff_ay = 0.0;
+  double ff_az = 0.0;
 
   if (drone_mass_ > 0.0) {
     double scale = feedforward_weight_ * cable.mu / drone_mass_;
-    ax += scale * cable.dir_x;
-    ay += scale * cable.dir_y;
-    az += scale * cable.dir_z;
+    ff_ax = scale * cable.dir_x;
+    ff_ay = scale * cable.dir_y;
+    ff_az = scale * cable.dir_z;
+    ax += ff_ax;
+    ay += ff_ay;
+    az += ff_az;
   } else {
     RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                          "drone_mass <= 0, skipping feedforward");
   }
+  RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                       "FF acc [%.3f %.3f %.3f] mu=%.3f dir=[%.3f %.3f %.3f]",
+                       ff_ax, ff_ay, ff_az, cable.mu,
+                       cable.dir_x, cable.dir_y, cable.dir_z);
 
   px4_msgs::msg::TrajectorySetpoint msg;
   msg.position[0] = static_cast<float>(traj.x);
@@ -737,7 +754,7 @@ void PvaControlNode::publish_trajectory_setpoint(
   msg.timestamp = 0;
 
   traj_pub_->publish(msg);
-  log_sample(this->now().seconds(), traj, cable, ax, ay, az);
+  log_sample(this->now().seconds(), traj, cable, ax, ay, az, ff_ax, ff_ay, ff_az);
 }
 
 void PvaControlNode::log_sample(double now_s,
@@ -745,10 +762,22 @@ void PvaControlNode::log_sample(double now_s,
                                 const CablePoint &cable,
                                 double acc_x,
                                 double acc_y,
-                                double acc_z)
+                                double acc_z,
+                                double ff_acc_x,
+                                double ff_acc_y,
+                                double ff_acc_z)
 {
   if (!log_enabled_ || !log_file_.is_open()) {
     return;
+  }
+  double acc_norm = std::sqrt(acc_x * acc_x + acc_y * acc_y + acc_z * acc_z);
+  double acc_dir_x = 0.0;
+  double acc_dir_y = 0.0;
+  double acc_dir_z = 0.0;
+  if (acc_norm > 1e-6) {
+    acc_dir_x = acc_x / acc_norm;
+    acc_dir_y = acc_y / acc_norm;
+    acc_dir_z = acc_z / acc_norm;
   }
   log_file_ << std::fixed << std::setprecision(6)
             << now_s << ","
@@ -757,6 +786,8 @@ void PvaControlNode::log_sample(double now_s,
             << traj.x << "," << traj.y << "," << traj.z << ","
             << traj.vx << "," << traj.vy << "," << traj.vz << ","
             << acc_x << "," << acc_y << "," << acc_z << ","
+            << acc_dir_x << "," << acc_dir_y << "," << acc_dir_z << ","
+            << ff_acc_x << "," << ff_acc_y << "," << ff_acc_z << ","
             << cable.dir_x << "," << cable.dir_y << "," << cable.dir_z << ","
             << cable.mu << ","
             << current_x_ << "," << current_y_ << "," << current_z_ << "\n";

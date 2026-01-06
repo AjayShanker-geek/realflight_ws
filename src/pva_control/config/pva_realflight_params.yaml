@@ -17,8 +17,8 @@
     feedback_weight: 0.0
     yaw_setpoint: 3.141592653589793
     payload_is_enu: true
-    enable_log: true
-    enable_debug_log: true
+    enable_log: false
+    enable_debug_log: false
     log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
     debug_log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
     debug_log_period: 0.2

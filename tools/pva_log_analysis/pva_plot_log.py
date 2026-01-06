@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import List, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib.widgets import Slider
 import numpy as np
+
+_SLIDERS = []
 
 
 def load_log(path: Path) -> np.ndarray:
@@ -166,6 +170,324 @@ def plot_acc(data_list: List[Tuple[str, np.ndarray]]) -> None:
     fig.tight_layout()
 
 
+def plot_acc_dir(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    axes[0].set_title("Acceleration direction (NED)")
+    has_any = False
+    for name, data in data_list:
+        if "acc_dir_x" not in data.dtype.names:
+            continue
+        t = data["t"]
+        for ax, axis in zip(axes, ["x", "y", "z"]):
+            ax.plot(t, data[f"acc_dir_{axis}"], label=f"{name} acc_dir_{axis}")
+            ax.set_ylabel(axis)
+        has_any = True
+    if not has_any:
+        plt.close(fig)
+        return
+    axes[-1].set_xlabel("time [s]")
+    for ax in axes:
+        ax.legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+
+
+def plot_feedforward_acc(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.set_title("Feedforward acceleration magnitude")
+    has_any = False
+    for name, data in data_list:
+        if "ff_acc_x" in data.dtype.names:
+            t = data["t"]
+            ff_norm = vec_norm(data, "ff_acc")
+            ax.plot(t, ff_norm, label=f"{name} ff_acc")
+            has_any = True
+    if not has_any:
+        plt.close(fig)
+        return
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("||ff_acc|| [m/s^2]")
+    ax.legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+
+
+def ned_to_enu(vec: np.ndarray) -> np.ndarray:
+    return np.array([vec[1], vec[0], -vec[2]], dtype=float)
+
+
+def plot_ff_acc_3d(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    for name, data in data_list:
+        names = data.dtype.names
+        if "ff_acc_x" not in names and "acc_x" not in names:
+            continue
+        t = data["t"]
+        t_rel = t - t[0]
+        ff_ned = np.vstack([data["ff_acc_x"], data["ff_acc_y"], data["ff_acc_z"]]).T if "ff_acc_x" in names else None
+        acc_ned = np.vstack([data["acc_x"], data["acc_y"], data["acc_z"]]).T if "acc_x" in names else None
+        if ff_ned is None and acc_ned is None:
+            continue
+
+        if "acc_dir_x" in names:
+            acc_dir_ned = np.vstack([data["acc_dir_x"], data["acc_dir_y"], data["acc_dir_z"]]).T
+        elif acc_ned is not None:
+            acc_dir_ned = np.zeros_like(acc_ned)
+            norms = np.linalg.norm(acc_ned, axis=1)
+            valid = norms > 1e-9
+            acc_dir_ned[valid] = acc_ned[valid] / norms[valid, None]
+        else:
+            acc_dir_ned = None
+
+        ff_enu = np.vstack([ned_to_enu(v) for v in ff_ned]) if ff_ned is not None else None
+        acc_enu = np.vstack([ned_to_enu(v) for v in acc_ned]) if acc_ned is not None else None
+        acc_dir_enu = np.vstack([ned_to_enu(v) for v in acc_dir_ned]) if acc_dir_ned is not None else None
+
+        mag_ff = np.linalg.norm(ff_enu, axis=1) if ff_enu is not None else None
+        mag_acc = np.linalg.norm(acc_enu, axis=1) if acc_enu is not None else None
+        max_mag = 0.0
+        if mag_ff is not None and mag_ff.size:
+            max_mag = max(max_mag, float(np.max(mag_ff)))
+        if mag_acc is not None and mag_acc.size:
+            max_mag = max(max_mag, float(np.max(mag_acc)))
+        axis_lim = max(1.0, max_mag * 1.1)
+        dir_scale = max(1.0, axis_lim * 0.5)
+
+        fig = plt.figure(figsize=(8, 8))
+        ax = fig.add_subplot(111, projection="3d")
+        fig.subplots_adjust(bottom=0.2)
+        ax.set_title(f"{name} Acc vectors (ENU)")
+        ax.set_xlabel("E")
+        ax.set_ylabel("N")
+        ax.set_zlabel("U")
+        ax.set_xlim(-axis_lim, axis_lim)
+        ax.set_ylim(-axis_lim, axis_lim)
+        ax.set_zlim(-axis_lim, axis_lim)
+        try:
+            ax.set_box_aspect([1, 1, 1])
+        except Exception:
+            pass
+
+        idx0 = 0
+        quiv_ff = None
+        quiv_acc = None
+        quiv_dir = None
+        if ff_enu is not None:
+            vec_ff = ff_enu[idx0]
+            mag_ff0 = mag_ff[idx0]
+            quiv_ff = ax.quiver(
+                0.0, 0.0, 0.0,
+                vec_ff[0], vec_ff[1], vec_ff[2],
+                length=mag_ff0 if mag_ff0 > 0.0 else 0.0,
+                normalize=mag_ff0 > 0.0,
+                color="tab:blue",
+            )
+        if acc_enu is not None:
+            vec_acc = acc_enu[idx0]
+            mag_acc0 = mag_acc[idx0]
+            quiv_acc = ax.quiver(
+                0.0, 0.0, 0.0,
+                vec_acc[0], vec_acc[1], vec_acc[2],
+                length=mag_acc0 if mag_acc0 > 0.0 else 0.0,
+                normalize=mag_acc0 > 0.0,
+                color="tab:green",
+            )
+        if acc_dir_enu is not None:
+            vec_dir = acc_dir_enu[idx0]
+            mag_dir = np.linalg.norm(vec_dir)
+            quiv_dir = ax.quiver(
+                0.0, 0.0, 0.0,
+                vec_dir[0], vec_dir[1], vec_dir[2],
+                length=dir_scale if mag_dir > 0.0 else 0.0,
+                normalize=mag_dir > 0.0,
+                color="tab:orange",
+            )
+
+        legend_items = []
+        if ff_enu is not None:
+            legend_items.append(Line2D([0], [0], color="tab:blue", lw=2, label="ff_acc"))
+        if acc_enu is not None:
+            legend_items.append(Line2D([0], [0], color="tab:green", lw=2, label="acc_cmd"))
+        if acc_dir_enu is not None:
+            legend_items.append(Line2D([0], [0], color="tab:orange", lw=2, label="acc_dir"))
+        if legend_items:
+            ax.legend(handles=legend_items, loc="upper right")
+
+        slider_ax = fig.add_axes([0.2, 0.08, 0.6, 0.03])
+        time_slider = Slider(slider_ax, "t", 0.0, float(t_rel[-1]), valinit=0.0)
+        _SLIDERS.append(time_slider)
+
+        def update(val: float) -> None:
+            nonlocal quiv_ff, quiv_acc, quiv_dir
+            idx = int(np.searchsorted(t_rel, val, side="left"))
+            if idx >= len(t_rel):
+                idx = len(t_rel) - 1
+            parts = [f"{name} Acc vectors (ENU) t={t_rel[idx]:.2f}s"]
+            if ff_enu is not None:
+                vec_ff = ff_enu[idx]
+                mag_ff_v = mag_ff[idx]
+                if quiv_ff is not None:
+                    quiv_ff.remove()
+                quiv_ff = ax.quiver(
+                    0.0, 0.0, 0.0,
+                    vec_ff[0], vec_ff[1], vec_ff[2],
+                    length=mag_ff_v if mag_ff_v > 0.0 else 0.0,
+                    normalize=mag_ff_v > 0.0,
+                    color="tab:blue",
+                )
+                parts.append(f"|ff|={mag_ff_v:.3f}")
+            if acc_enu is not None:
+                vec_acc = acc_enu[idx]
+                mag_acc_v = mag_acc[idx]
+                if quiv_acc is not None:
+                    quiv_acc.remove()
+                quiv_acc = ax.quiver(
+                    0.0, 0.0, 0.0,
+                    vec_acc[0], vec_acc[1], vec_acc[2],
+                    length=mag_acc_v if mag_acc_v > 0.0 else 0.0,
+                    normalize=mag_acc_v > 0.0,
+                    color="tab:green",
+                )
+                parts.append(f"|acc|={mag_acc_v:.3f}")
+            if acc_dir_enu is not None:
+                vec_dir = acc_dir_enu[idx]
+                mag_dir = np.linalg.norm(vec_dir)
+                if quiv_dir is not None:
+                    quiv_dir.remove()
+                quiv_dir = ax.quiver(
+                    0.0, 0.0, 0.0,
+                    vec_dir[0], vec_dir[1], vec_dir[2],
+                    length=dir_scale if mag_dir > 0.0 else 0.0,
+                    normalize=mag_dir > 0.0,
+                    color="tab:orange",
+                )
+            ax.set_title(" | ".join(parts))
+            fig.canvas.draw_idle()
+
+        time_slider.on_changed(update)
+
+
+def plot_ff_acc_3d_multi(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    entries = []
+    for name, data in data_list:
+        names = data.dtype.names
+        if "ff_acc_x" not in names and "acc_x" not in names:
+            continue
+        entries.append((name, data))
+        if len(entries) >= 3:
+            break
+    if len(entries) < 2:
+        return
+
+    colors = ["tab:blue", "tab:orange", "tab:green"]
+    markers = {"ff": "o", "acc": "^", "dir": "s"}
+    t_refs = [d["t"] - d["t"][0] for _, d in entries]
+    t_max = max(float(t[-1]) for t in t_refs if t.size)
+
+    ff_enu_all = []
+    acc_enu_all = []
+    acc_dir_enu_all = []
+    max_mag = 0.0
+
+    for _, data in entries:
+        names = data.dtype.names
+        ff_ned = np.vstack([data["ff_acc_x"], data["ff_acc_y"], data["ff_acc_z"]]).T if "ff_acc_x" in names else None
+        acc_ned = np.vstack([data["acc_x"], data["acc_y"], data["acc_z"]]).T if "acc_x" in names else None
+        if "acc_dir_x" in names:
+            acc_dir_ned = np.vstack([data["acc_dir_x"], data["acc_dir_y"], data["acc_dir_z"]]).T
+        elif acc_ned is not None:
+            acc_dir_ned = np.zeros_like(acc_ned)
+            norms = np.linalg.norm(acc_ned, axis=1)
+            valid = norms > 1e-9
+            acc_dir_ned[valid] = acc_ned[valid] / norms[valid, None]
+        else:
+            acc_dir_ned = None
+
+        ff_enu = np.vstack([ned_to_enu(v) for v in ff_ned]) if ff_ned is not None else None
+        acc_enu = np.vstack([ned_to_enu(v) for v in acc_ned]) if acc_ned is not None else None
+        acc_dir_enu = np.vstack([ned_to_enu(v) for v in acc_dir_ned]) if acc_dir_ned is not None else None
+
+        if ff_enu is not None and ff_enu.size:
+            max_mag = max(max_mag, float(np.max(np.linalg.norm(ff_enu, axis=1))))
+        if acc_enu is not None and acc_enu.size:
+            max_mag = max(max_mag, float(np.max(np.linalg.norm(acc_enu, axis=1))))
+
+        ff_enu_all.append(ff_enu)
+        acc_enu_all.append(acc_enu)
+        acc_dir_enu_all.append(acc_dir_enu)
+
+    axis_lim = max(1.0, max_mag * 1.1)
+    dir_scale = max(1.0, axis_lim * 0.5)
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection="3d")
+    fig.subplots_adjust(bottom=0.2)
+    ax.set_title("Acc vectors (ENU) - multi-drone")
+    ax.set_xlabel("E")
+    ax.set_ylabel("N")
+    ax.set_zlabel("U")
+    ax.set_xlim(-axis_lim, axis_lim)
+    ax.set_ylim(-axis_lim, axis_lim)
+    ax.set_zlim(-axis_lim, axis_lim)
+    try:
+        ax.set_box_aspect([1, 1, 1])
+    except Exception:
+        pass
+
+    lines = []
+    for idx, (name, _) in enumerate(entries):
+        color = colors[idx % len(colors)]
+        ff_vec = ff_enu_all[idx]
+        acc_vec = acc_enu_all[idx]
+        dir_vec = acc_dir_enu_all[idx]
+
+        if ff_vec is not None:
+            line_ff, = ax.plot([0.0, ff_vec[0, 0]],
+                               [0.0, ff_vec[0, 1]],
+                               [0.0, ff_vec[0, 2]],
+                               color=color, marker=markers["ff"],
+                               label=f"{name} ff_acc")
+            lines.append(("ff", idx, line_ff))
+        if acc_vec is not None:
+            line_acc, = ax.plot([0.0, acc_vec[0, 0]],
+                                [0.0, acc_vec[0, 1]],
+                                [0.0, acc_vec[0, 2]],
+                                color=color, marker=markers["acc"],
+                                label=f"{name} acc_cmd")
+            lines.append(("acc", idx, line_acc))
+        if dir_vec is not None:
+            vec0 = dir_vec[0] * dir_scale
+            line_dir, = ax.plot([0.0, vec0[0]],
+                                [0.0, vec0[1]],
+                                [0.0, vec0[2]],
+                                color=color, marker=markers["dir"],
+                                label=f"{name} acc_dir")
+            lines.append(("dir", idx, line_dir))
+
+    ax.legend(ncol=2, fontsize=8)
+
+    slider_ax = fig.add_axes([0.2, 0.08, 0.6, 0.03])
+    time_slider = Slider(slider_ax, "t", 0.0, t_max, valinit=0.0)
+    _SLIDERS.append(time_slider)
+
+    def update(val: float) -> None:
+        parts = [f"t={val:.2f}s"]
+        for kind, idx, line in lines:
+            t_rel = t_refs[idx]
+            i = int(np.searchsorted(t_rel, val, side="left"))
+            if i >= len(t_rel):
+                i = len(t_rel) - 1
+            if kind == "ff":
+                vec = ff_enu_all[idx][i]
+            elif kind == "acc":
+                vec = acc_enu_all[idx][i]
+            else:
+                vec = acc_dir_enu_all[idx][i] * dir_scale
+            line.set_data(np.array([0.0, vec[0]]), np.array([0.0, vec[1]]))
+            line.set_3d_properties(np.array([0.0, vec[2]]))
+        ax.set_title("Acc vectors (ENU) - multi-drone | " + " ".join(parts))
+        fig.canvas.draw_idle()
+
+    time_slider.on_changed(update)
+
+
 def plot_feedback(data_list: List[Tuple[str, np.ndarray]]) -> None:
     fig, ax = plt.subplots(figsize=(12, 5))
     ax.set_title("Cable force norms (mu_ff, mu_fb)")
@@ -222,6 +544,10 @@ def main() -> None:
     data_list = load_multi(Path(args.path))
     plot_position(data_list)
     plot_acc(data_list)
+    plot_acc_dir(data_list)
+    plot_feedforward_acc(data_list)
+    plot_ff_acc_3d(data_list)
+    plot_ff_acc_3d_multi(data_list)
     plot_feedback(data_list)
     plot_jerk(data_list)
     plt.show()

@@ -192,8 +192,8 @@ def main() -> None:
                         get_col(data, "sp_z")]).T
         pos_err = np.linalg.norm(odom - sp, axis=1)
 
-  payload_err = None
-  if ("payload_x_enu" in data.dtype.names and
+    payload_err = None
+    if ("payload_x_enu" in data.dtype.names and
             "payload_des_x" in data.dtype.names):
         payload = np.vstack([get_col(data, "payload_x_enu"),
                              get_col(data, "payload_y_enu"),
@@ -203,36 +203,45 @@ def main() -> None:
                                  get_col(data, "payload_des_z")]).T
         payload_err = np.linalg.norm(payload - payload_des, axis=1)
 
-  summary = {
-    "samples": int(data.shape[0]),
-    "duration_s": duration,
-    "mean_dt_s": dt_mean,
-    "acc_norm": maybe_stats(vector_norm(data, "acc")),
-    "cable_mu": maybe_stats(get_col(data, "cable_mu")),
-    "pos_err_norm": maybe_stats(pos_err),
-    "payload_err_norm": maybe_stats(payload_err),
-    "sp_pos_axis": axis_stats(data, "sp"),
-  }
+    summary = {
+        "samples": int(data.shape[0]),
+        "duration_s": duration,
+        "mean_dt_s": dt_mean,
+        "acc_norm": maybe_stats(vector_norm(data, "acc")),
+        "acc_dir_axis": axis_stats(data, "acc_dir"),
+        "ff_acc_norm": maybe_stats(vector_norm(data, "ff_acc")),
+        "cable_mu": maybe_stats(get_col(data, "cable_mu")),
+        "pos_err_norm": maybe_stats(pos_err),
+        "payload_err_norm": maybe_stats(payload_err),
+        "sp_pos_axis": axis_stats(data, "sp"),
+    }
 
-  # Feedback log extras.
-  summary["mu_ff_norm"] = maybe_stats(vector_norm(data, "mu_ff"))
-  summary["mu_fb_norm"] = maybe_stats(vector_norm(data, "mu_fb"))
-  summary["ex_enu_norm"] = maybe_stats(vector_norm(data, "ex_enu"))
-  summary["ev_enu_norm"] = maybe_stats(vector_norm(data, "ev_enu"))
-  summary["jerk_cmd_norm"] = maybe_stats(jerk_from_acc(data, t))
-  summary["jerk_actual_norm"] = maybe_stats(actual_jerk(data, t))
+    # Feedback log extras.
+    summary["mu_ff_norm"] = maybe_stats(vector_norm(data, "mu_ff"))
+    summary["mu_fb_norm"] = maybe_stats(vector_norm(data, "mu_fb"))
+    summary["ex_enu_norm"] = maybe_stats(vector_norm(data, "ex_enu"))
+    summary["ev_enu_norm"] = maybe_stats(vector_norm(data, "ev_enu"))
+    summary["jerk_cmd_norm"] = maybe_stats(jerk_from_acc(data, t))
+    summary["jerk_actual_norm"] = maybe_stats(actual_jerk(data, t))
 
-  print(f"samples: {summary['samples']}  duration: {summary['duration_s']:.3f}s  mean_dt: {summary['mean_dt_s']:.4f}s")
-  print(f"acc_norm: {fmt(summary['acc_norm'])}")
-  print(f"cable_mu: {fmt(summary['cable_mu'])}")
-  print(f"pos_err_norm: {fmt(summary['pos_err_norm'])}")
-  print(f"payload_err_norm: {fmt(summary['payload_err_norm'])}")
-  print(f"mu_ff_norm: {fmt(summary['mu_ff_norm'])}")
-  print(f"mu_fb_norm: {fmt(summary['mu_fb_norm'])}")
-  print(f"ex_enu_norm: {fmt(summary['ex_enu_norm'])}")
-  print(f"ev_enu_norm: {fmt(summary['ev_enu_norm'])}")
-  print(f"jerk_cmd_norm: {fmt(summary['jerk_cmd_norm'])}")
-  print(f"jerk_actual_norm: {fmt(summary['jerk_actual_norm'])}")
+    print(f"samples: {summary['samples']}  duration: {summary['duration_s']:.3f}s  mean_dt: {summary['mean_dt_s']:.4f}s")
+    print(f"acc_norm: {fmt(summary['acc_norm'])}")
+    if summary["acc_dir_axis"] is not None:
+        acc_dir = summary["acc_dir_axis"]
+        print("acc_dir_mean: [{:.4f} {:.4f} {:.4f}]".format(
+            acc_dir["x"]["mean"], acc_dir["y"]["mean"], acc_dir["z"]["mean"]))
+    else:
+        print("acc_dir_mean: missing")
+    print(f"ff_acc_norm: {fmt(summary['ff_acc_norm'])}")
+    print(f"cable_mu: {fmt(summary['cable_mu'])}")
+    print(f"pos_err_norm: {fmt(summary['pos_err_norm'])}")
+    print(f"payload_err_norm: {fmt(summary['payload_err_norm'])}")
+    print(f"mu_ff_norm: {fmt(summary['mu_ff_norm'])}")
+    print(f"mu_fb_norm: {fmt(summary['mu_fb_norm'])}")
+    print(f"ex_enu_norm: {fmt(summary['ex_enu_norm'])}")
+    print(f"ev_enu_norm: {fmt(summary['ev_enu_norm'])}")
+    print(f"jerk_cmd_norm: {fmt(summary['jerk_cmd_norm'])}")
+    print(f"jerk_actual_norm: {fmt(summary['jerk_actual_norm'])}")
 
     if args.json_path:
         with open(args.json_path, "w", encoding="utf-8") as f:

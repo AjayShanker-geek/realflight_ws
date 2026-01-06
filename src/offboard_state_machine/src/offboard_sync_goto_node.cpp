@@ -286,14 +286,16 @@ void OffboardSyncGoto::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
     RCLCPP_WARN(get_logger(), "Switching to TRAJ mode (external setpoints)");
   } else if (cmd_state == SyncFsmState::END_TRAJ) {
     current_state_ = SyncFsmState::END_TRAJ;
-    hover_x_ = current_x_;
-    hover_y_ = current_y_;
-    hover_z_ = current_z_;
+    end_traj_x_ = current_x_;
+    end_traj_y_ = current_y_;
+    end_traj_z_ = current_z_;
     end_traj_start_time_ = now();
     end_traj_timer_started_ = true;
     RCLCPP_INFO(get_logger(), "END_TRAJ: hold and prepare for landing after wait");
   } else if (cmd_state == SyncFsmState::LAND) {
-    Eigen::Vector3d p_target(current_x_, current_y_, 0.0);
+    land_x_ = current_x_;
+    land_y_ = current_y_;
+    Eigen::Vector3d p_target(land_x_, land_y_, 0.0);
     start_mjerk_segment(p_target, 3.0);
     current_state_ = SyncFsmState::LAND;
     RCLCPP_WARN(get_logger(), "Received LAND command, descending");
@@ -444,18 +446,22 @@ void OffboardSyncGoto::publish_current_setpoint()
         sp.position[2] = static_cast<float>(goto_target_ready_ ? goto_z_ : current_z_);
         break;
 
-      case SyncFsmState::LAND:
-      case SyncFsmState::DONE:
-        sp.position[0] = static_cast<float>(current_x_);
-        sp.position[1] = static_cast<float>(current_y_);
+    case SyncFsmState::LAND:
+    case SyncFsmState::DONE:
+        sp.position[0] = static_cast<float>(land_x_);
+        sp.position[1] = static_cast<float>(land_y_);
         sp.position[2] = 0.0f;
         break;
 
       case SyncFsmState::TRAJ:
-      case SyncFsmState::END_TRAJ:
         sp.position[0] = static_cast<float>(current_x_);
         sp.position[1] = static_cast<float>(current_y_);
         sp.position[2] = static_cast<float>(current_z_);
+        break;
+      case SyncFsmState::END_TRAJ:
+        sp.position[0] = static_cast<float>(end_traj_x_);
+        sp.position[1] = static_cast<float>(end_traj_y_);
+        sp.position[2] = static_cast<float>(end_traj_z_);
         break;
     }
 
@@ -541,7 +547,9 @@ void OffboardSyncGoto::timer_cb()
       if (end_traj_timer_started_) {
         double elapsed = (now() - end_traj_start_time_).seconds();
         if (elapsed >= end_traj_wait_time_ && !active_seg_.has_value()) {
-          Eigen::Vector3d p_target(current_x_, current_y_, 0.0);
+          land_x_ = current_x_;
+          land_y_ = current_y_;
+          Eigen::Vector3d p_target(land_x_, land_y_, 0.0);
           start_mjerk_segment(p_target, landing_time_s_);
           current_state_ = SyncFsmState::LAND;
           RCLCPP_INFO(get_logger(),
