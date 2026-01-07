@@ -104,6 +104,7 @@ private:
   bool takeoff_done_{false};
   bool goto_done_{false};
   bool end_traj_timer_started_{false};
+  bool end_traj_target_ready_{false};
 
   double current_x_, current_y_, current_z_;
   Eigen::Vector3d current_vel_{0, 0, 0};

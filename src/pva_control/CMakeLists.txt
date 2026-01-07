@@ -27,6 +27,8 @@ ament_target_dependencies(pva_control_node
   rclcpp
   std_msgs
   px4_msgs
+  geometry_msgs
+  nav_msgs
   offboard_state_machine
 )
 

@@ -107,7 +107,7 @@ OffboardSyncGoto::OffboardSyncGoto(int drone_id)
 , timer_period_s_(declare_parameter("timer_period", 0.02))
 , landing_time_s_(declare_parameter("landing_time", 5.0))
 , landing_max_vel_(declare_parameter("landing_max_vel", 0.3))
-, end_traj_wait_time_(declare_parameter("end_traj_wait_time", 5.0))
+, end_traj_wait_time_(declare_parameter("end_traj_wait_time", 7.0))
 , traj_base_dir_(declare_parameter("traj_base_dir", std::string("data/3drone_trajectories_new")))
 , use_raw_traj_(declare_parameter("use_raw_traj", false))
 , current_state_(SyncFsmState::INIT)
@@ -198,26 +198,49 @@ bool OffboardSyncGoto::load_first_waypoint()
     return false;
   }
 
-  std::stringstream ss(line);
-  std::string token;
-  std::vector<double> values;
-  while (std::getline(ss, token, ',')) {
-    try {
-      values.push_back(std::stod(token));
-    } catch (const std::exception&) {
-      values.push_back(0.0);
+  auto parse_xyz = [](const std::string& row, double& x, double& y, double& z) {
+    std::stringstream ss(row);
+    std::string token;
+    std::vector<double> values;
+    while (std::getline(ss, token, ',')) {
+      try {
+        values.push_back(std::stod(token));
+      } catch (const std::exception&) {
+        values.push_back(0.0);
+      }
     }
-  }
+    if (values.size() < 4) {
+      return false;
+    }
+    x = values[1];
+    y = values[2];
+    z = values[3];
+    return true;
+  };
 
-  if (values.size() < 4) {
+  if (!parse_xyz(line, goto_x_, goto_y_, goto_z_)) {
     RCLCPP_ERROR(get_logger(), "CSV %s first row malformed", csv_path.c_str());
     return false;
   }
-
-  goto_x_ = values[1];
-  goto_y_ = values[2];
-  goto_z_ = values[3];
   goto_target_ready_ = true;
+
+  std::string last_line = line;
+  while (std::getline(fin, line)) {
+    if (line.find_first_not_of(" \t\r\n") == std::string::npos) {
+      continue;
+    }
+    last_line = line;
+  }
+
+  if (parse_xyz(last_line, end_traj_x_, end_traj_y_, end_traj_z_)) {
+    end_traj_target_ready_ = true;
+    RCLCPP_INFO(get_logger(), "End-traj target from CSV: [%.2f, %.2f, %.2f] (%s)",
+                end_traj_x_, end_traj_y_, end_traj_z_, csv_path.c_str());
+  } else {
+    RCLCPP_WARN(get_logger(),
+                "CSV %s last row malformed; END_TRAJ will use current position",
+                csv_path.c_str());
+  }
 
   RCLCPP_INFO(get_logger(), "Goto target from CSV: [%.2f, %.2f, %.2f] (%s)",
               goto_x_, goto_y_, goto_z_, csv_path.c_str());
@@ -286,12 +309,16 @@ void OffboardSyncGoto::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
     RCLCPP_WARN(get_logger(), "Switching to TRAJ mode (external setpoints)");
   } else if (cmd_state == SyncFsmState::END_TRAJ) {
     current_state_ = SyncFsmState::END_TRAJ;
-    end_traj_x_ = current_x_;
-    end_traj_y_ = current_y_;
-    end_traj_z_ = current_z_;
+    if (!end_traj_target_ready_) {
+      end_traj_x_ = current_x_;
+      end_traj_y_ = current_y_;
+      end_traj_z_ = current_z_;
+      RCLCPP_WARN(get_logger(), "END_TRAJ: CSV target unavailable, using current position");
+    }
     end_traj_start_time_ = now();
     end_traj_timer_started_ = true;
-    RCLCPP_INFO(get_logger(), "END_TRAJ: hold and prepare for landing after wait");
+    RCLCPP_INFO(get_logger(), "END_TRAJ: hold at [%.2f, %.2f, %.2f] and prepare for landing after wait",
+                end_traj_x_, end_traj_y_, end_traj_z_);
   } else if (cmd_state == SyncFsmState::LAND) {
     land_x_ = current_x_;
     land_y_ = current_y_;
@@ -547,9 +574,11 @@ void OffboardSyncGoto::timer_cb()
       if (end_traj_timer_started_) {
         double elapsed = (now() - end_traj_start_time_).seconds();
         if (elapsed >= end_traj_wait_time_ && !active_seg_.has_value()) {
-          land_x_ = current_x_;
-          land_y_ = current_y_;
-          Eigen::Vector3d p_target(land_x_, land_y_, 0.0);
+          double land_target_x = end_traj_target_ready_ ? end_traj_x_ : current_x_;
+          double land_target_y = end_traj_target_ready_ ? end_traj_y_ : current_y_;
+          land_x_ = land_target_x;
+          land_y_ = land_target_y;
+          Eigen::Vector3d p_target(land_target_x, land_target_y, 0.0);
           start_mjerk_segment(p_target, landing_time_s_);
           current_state_ = SyncFsmState::LAND;
           RCLCPP_INFO(get_logger(),
