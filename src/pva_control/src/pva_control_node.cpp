@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cmath>
 #include <ctime>
 #include <filesystem>
@@ -183,6 +184,37 @@ PvaControlNode::PvaControlNode(int drone_id, int total_drones)
   feedforward_weight_ = this->declare_parameter("feedforward_weight", 1.0);
   use_wall_timer_ = this->declare_parameter("use_wall_timer", false);
   std::string mode = this->declare_parameter("mode", std::string("sitl"));
+  use_payload_stamp_time_ = this->declare_parameter("use_payload_stamp_time", false);
+  payload_input_ = this->declare_parameter("payload_input", std::string("odom"));
+  payload_pose_topic_ = this->declare_parameter(
+    "payload_pose_topic", std::string("/vrpn_mocap/multilift_payload/pose"));
+  payload_odom_topic_ = this->declare_parameter("payload_odom_topic", payload_pose_topic_);
+  if (payload_input_ == "odom" && payload_odom_topic_.empty()) {
+    payload_odom_topic_ = payload_pose_topic_;
+  }
+  if (payload_input_ == "pose" && payload_pose_topic_.empty()) {
+    payload_pose_topic_ = payload_odom_topic_;
+  }
+  use_odom_stamp_time_ = this->declare_parameter(
+    "use_odom_stamp_time", mode == "sitl" && !use_payload_stamp_time_);
+  if (use_payload_stamp_time_ && use_odom_stamp_time_) {
+    RCLCPP_WARN(this->get_logger(),
+                "use_payload_stamp_time=true overrides use_odom_stamp_time=true");
+    use_odom_stamp_time_ = false;
+  }
+  if (!this->has_parameter("use_sim_time")) {
+    this->declare_parameter("use_sim_time", false);
+  }
+  bool use_sim_time = false;
+  this->get_parameter("use_sim_time", use_sim_time);
+  if (use_sim_time) {
+    RCLCPP_INFO(this->get_logger(), "Using simulated time");
+  }
+  if ((use_payload_stamp_time_ || use_odom_stamp_time_) && !use_wall_timer_) {
+    RCLCPP_WARN(this->get_logger(),
+                "stamp-based time enabled: forcing use_wall_timer=true");
+    use_wall_timer_ = true;
+  }
   bool enable_log = this->declare_parameter("enable_log", false);
   bool enable_debug_log = this->declare_parameter("enable_debug_log", false);
   std::string log_path = this->declare_parameter("log_path", std::string(""));
@@ -330,6 +362,23 @@ PvaControlNode::PvaControlNode(int drone_id, int total_drones)
     px4_namespace_ + "out/vehicle_odometry",
     rclcpp::SensorDataQoS(),
     std::bind(&PvaControlNode::odom_callback, this, std::placeholders::_1));
+
+  if (use_payload_stamp_time_) {
+    if (payload_input_ == "pose") {
+      payload_pose_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
+        payload_pose_topic_, rclcpp::SensorDataQoS(),
+        std::bind(&PvaControlNode::payload_pose_cb, this, std::placeholders::_1));
+    } else if (payload_input_ == "odom") {
+      payload_odom_sub_ = this->create_subscription<nav_msgs::msg::Odometry>(
+        payload_odom_topic_, rclcpp::SensorDataQoS(),
+        std::bind(&PvaControlNode::payload_odom_cb, this, std::placeholders::_1));
+    } else {
+      RCLCPP_WARN(this->get_logger(),
+                  "Unknown payload_input '%s'; disabling payload stamp time",
+                  payload_input_.c_str());
+      use_payload_stamp_time_ = false;
+    }
+  }
 
   if (use_wall_timer_) {
     timer_ = this->create_wall_timer(
@@ -628,12 +677,42 @@ void PvaControlNode::swarm_state_callback(
   }
 }
 
+void PvaControlNode::payload_pose_cb(
+  const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+{
+  update_sim_time(msg->header.stamp);
+}
+
+void PvaControlNode::payload_odom_cb(
+  const nav_msgs::msg::Odometry::SharedPtr msg)
+{
+  update_sim_time(msg->header.stamp);
+}
+
+void PvaControlNode::update_sim_time(const rclcpp::Time &stamp)
+{
+  if (stamp.nanoseconds() <= 0) {
+    return;
+  }
+  sim_time_ = stamp.seconds();
+  last_sim_time_ = sim_time_;
+  sim_time_ready_ = true;
+}
+
 void PvaControlNode::odom_callback(
   const px4_msgs::msg::VehicleOdometry::SharedPtr msg)
 {
   current_x_ = msg->position[0];
   current_y_ = msg->position[1];
   current_z_ = msg->position[2];
+  if (use_odom_stamp_time_ && !use_payload_stamp_time_) {
+    uint64_t ts = msg->timestamp != 0 ? msg->timestamp : msg->timestamp_sample;
+    if (ts > 0) {
+      sim_time_ = static_cast<double>(ts) * 1e-6;
+      last_sim_time_ = sim_time_;
+      sim_time_ready_ = true;
+    }
+  }
   odom_ready_ = true;
 }
 
@@ -646,7 +725,11 @@ void PvaControlNode::timer_callback()
                 static_cast<int>(current_state_), traj_started_, traj_time_initialized_,
                 waiting_for_swarm_, traj_completed_, odom_ready_);
   }
-  debug_log_sample(this->now().seconds());
+  double now_s = this->now().seconds();
+  if ((use_payload_stamp_time_ || use_odom_stamp_time_) && sim_time_ready_) {
+    now_s = sim_time_;
+  }
+  debug_log_sample(now_s);
 
   if (!odom_ready_) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -665,16 +748,28 @@ void PvaControlNode::timer_callback()
                           "Cable data not loaded!");
     return;
   }
+  if ((use_payload_stamp_time_ || use_odom_stamp_time_) && !sim_time_ready_) {
+    RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                         "Waiting for stamp time source");
+    return;
+  }
 
   if (current_state_ == FsmState::TRAJ && traj_started_ && !traj_completed_) {
     if (!traj_time_initialized_) {
       traj_start_time_ = this->now();
+      traj_start_time_sim_ = sim_time_;
+      use_stamp_time_for_traj_ = (use_payload_stamp_time_ || use_odom_stamp_time_) && sim_time_ready_;
       traj_time_initialized_ = true;
       RCLCPP_WARN(this->get_logger(),
                   "TRAJECTORY EXECUTION STARTED (t=0.00s)");
     }
 
-    double elapsed = (this->now() - traj_start_time_).seconds();
+    double elapsed = 0.0;
+    if (use_stamp_time_for_traj_) {
+      elapsed = sim_time_ - traj_start_time_sim_;
+    } else {
+      elapsed = (this->now() - traj_start_time_).seconds();
+    }
 
     if (elapsed >= trajectory_.back().time) {
       if (!traj_completed_) {
@@ -754,7 +849,11 @@ void PvaControlNode::publish_trajectory_setpoint(
   msg.timestamp = 0;
 
   traj_pub_->publish(msg);
-  log_sample(this->now().seconds(), traj, cable, ax, ay, az, ff_ax, ff_ay, ff_az);
+  double now_s = this->now().seconds();
+  if ((use_payload_stamp_time_ || use_odom_stamp_time_) && sim_time_ready_) {
+    now_s = sim_time_;
+  }
+  log_sample(now_s, traj, cable, ax, ay, az, ff_ax, ff_ay, ff_az);
 }
 
 void PvaControlNode::log_sample(double now_s,

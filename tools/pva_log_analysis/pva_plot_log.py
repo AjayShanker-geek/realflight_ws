@@ -314,8 +314,20 @@ def plot_ff_acc_3d(data_list: List[Tuple[str, np.ndarray]]) -> None:
         time_slider = Slider(slider_ax, "t", 0.0, float(t_rel[-1]), valinit=0.0)
         _SLIDERS.append(time_slider)
 
-        def update(val: float) -> None:
-            nonlocal quiv_ff, quiv_acc, quiv_dir
+        quiv_state = {"ff": quiv_ff, "acc": quiv_acc, "dir": quiv_dir}
+
+        def update(val: float,
+                   t_rel=t_rel,
+                   name=name,
+                   ff_enu=ff_enu,
+                   acc_enu=acc_enu,
+                   acc_dir_enu=acc_dir_enu,
+                   mag_ff=mag_ff,
+                   mag_acc=mag_acc,
+                   dir_scale=dir_scale,
+                   ax=ax,
+                   fig=fig,
+                   quiv_state=quiv_state) -> None:
             idx = int(np.searchsorted(t_rel, val, side="left"))
             if idx >= len(t_rel):
                 idx = len(t_rel) - 1
@@ -323,9 +335,9 @@ def plot_ff_acc_3d(data_list: List[Tuple[str, np.ndarray]]) -> None:
             if ff_enu is not None:
                 vec_ff = ff_enu[idx]
                 mag_ff_v = mag_ff[idx]
-                if quiv_ff is not None:
-                    quiv_ff.remove()
-                quiv_ff = ax.quiver(
+                if quiv_state["ff"] is not None:
+                    quiv_state["ff"].remove()
+                quiv_state["ff"] = ax.quiver(
                     0.0, 0.0, 0.0,
                     vec_ff[0], vec_ff[1], vec_ff[2],
                     length=mag_ff_v if mag_ff_v > 0.0 else 0.0,
@@ -336,9 +348,9 @@ def plot_ff_acc_3d(data_list: List[Tuple[str, np.ndarray]]) -> None:
             if acc_enu is not None:
                 vec_acc = acc_enu[idx]
                 mag_acc_v = mag_acc[idx]
-                if quiv_acc is not None:
-                    quiv_acc.remove()
-                quiv_acc = ax.quiver(
+                if quiv_state["acc"] is not None:
+                    quiv_state["acc"].remove()
+                quiv_state["acc"] = ax.quiver(
                     0.0, 0.0, 0.0,
                     vec_acc[0], vec_acc[1], vec_acc[2],
                     length=mag_acc_v if mag_acc_v > 0.0 else 0.0,
@@ -349,9 +361,9 @@ def plot_ff_acc_3d(data_list: List[Tuple[str, np.ndarray]]) -> None:
             if acc_dir_enu is not None:
                 vec_dir = acc_dir_enu[idx]
                 mag_dir = np.linalg.norm(vec_dir)
-                if quiv_dir is not None:
-                    quiv_dir.remove()
-                quiv_dir = ax.quiver(
+                if quiv_state["dir"] is not None:
+                    quiv_state["dir"].remove()
+                quiv_state["dir"] = ax.quiver(
                     0.0, 0.0, 0.0,
                     vec_dir[0], vec_dir[1], vec_dir[2],
                     length=dir_scale if mag_dir > 0.0 else 0.0,

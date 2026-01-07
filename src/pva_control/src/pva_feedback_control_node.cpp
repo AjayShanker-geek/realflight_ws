@@ -295,6 +295,19 @@ PvaFeedbackControlNode::PvaFeedbackControlNode(int drone_id, int total_drones)
   use_wall_timer_ = this->declare_parameter("use_wall_timer", false);
   use_payload_stamp_time_ = this->declare_parameter("use_payload_stamp_time", false);
   std::string mode = this->declare_parameter("mode", std::string("sitl"));
+  if (!this->has_parameter("use_sim_time")) {
+    this->declare_parameter("use_sim_time", false);
+  }
+  bool use_sim_time = false;
+  this->get_parameter("use_sim_time", use_sim_time);
+  if (use_sim_time) {
+    RCLCPP_INFO(this->get_logger(), "Using simulated time");
+  }
+  if (use_payload_stamp_time_ && !use_wall_timer_) {
+    RCLCPP_WARN(this->get_logger(),
+                "use_payload_stamp_time=true: forcing use_wall_timer=true");
+    use_wall_timer_ = true;
+  }
   this->declare_parameter("use_internal_state_machine", false);
   this->declare_parameter("command_all_drones", false);
   this->declare_parameter("lps_transient_local", false);
@@ -1189,7 +1202,8 @@ void PvaFeedbackControlNode::timer_callback()
                 static_cast<int>(current_state_), traj_started_, traj_time_initialized_,
                 waiting_for_swarm_, traj_completed_, odom_ready_, payload_ready_);
   }
-  debug_log_sample(this->now().seconds());
+  double now_s = use_payload_stamp_time_ ? sim_time_ : this->now().seconds();
+  debug_log_sample(now_s);
 
   if (!odom_ready_) {
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
@@ -1349,7 +1363,8 @@ void PvaFeedbackControlNode::publish_trajectory_setpoint(
   msg.timestamp = 0;
 
   traj_pub_->publish(msg);
-  log_sample(this->now().seconds(), traj, payload_des, acc_cmd, mu_ff, mu_fb,
+  double now_s = use_payload_stamp_time_ ? sim_time_ : this->now().seconds();
+  log_sample(now_s, traj, payload_des, acc_cmd, mu_ff, mu_fb,
              payload_pos_enu, payload_vel_enu, e_x_enu, e_v_enu);
 }
 

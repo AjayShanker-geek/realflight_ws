@@ -5,6 +5,8 @@
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 
 #include <fstream>
 #include <map>
@@ -55,6 +57,9 @@ private:
   void state_callback(const std_msgs::msg::Int32::SharedPtr msg);
   void swarm_state_callback(const std_msgs::msg::Int32::SharedPtr msg, int other_drone_id);
   void odom_callback(const px4_msgs::msg::VehicleOdometry::SharedPtr msg);
+  void payload_pose_cb(const geometry_msgs::msg::PoseStamped::SharedPtr msg);
+  void payload_odom_cb(const nav_msgs::msg::Odometry::SharedPtr msg);
+  void update_sim_time(const rclcpp::Time &stamp);
 
   bool load_trajectory_from_csv(const std::string &filepath);
   bool load_cable_from_csv(const std::string &filepath);
@@ -85,6 +90,8 @@ private:
   // Subscribers
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr state_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr payload_pose_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr payload_odom_sub_;
   std::vector<rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr> swarm_state_subs_;
 
   // Timer
@@ -111,12 +118,17 @@ private:
   bool traj_completed_;
   bool traj_time_initialized_;
   rclcpp::Time traj_start_time_;
+  double traj_start_time_sim_{0.0};
+  bool use_stamp_time_for_traj_{false};
 
   // Odometry
   double current_x_;
   double current_y_;
   double current_z_;
   bool odom_ready_;
+  double sim_time_{0.0};
+  double last_sim_time_{0.0};
+  bool sim_time_ready_{false};
 
   // Parameters
   double timer_period_;
@@ -126,6 +138,11 @@ private:
   double drone_mass_;
   double feedforward_weight_;
   bool use_wall_timer_;
+  bool use_odom_stamp_time_{false};
+  bool use_payload_stamp_time_{false};
+  std::string payload_input_;
+  std::string payload_pose_topic_;
+  std::string payload_odom_topic_;
 
   // Logging
   bool log_enabled_;
