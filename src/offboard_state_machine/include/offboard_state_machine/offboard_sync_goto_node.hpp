@@ -67,6 +67,9 @@ private:
                            double duration,
                            const Eigen::Vector3d& v_target = Eigen::Vector3d::Zero(),
                            const Eigen::Vector3d& a_target = Eigen::Vector3d::Zero());
+  void start_mjerk_segment_from(const Eigen::Vector3d& p_start,
+                                const Eigen::Vector3d& p_target,
+                                double duration);
   bool load_first_waypoint();
   void compute_takeoff_target();
   std::string px4_namespace() const;
