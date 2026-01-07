@@ -320,12 +320,17 @@ void OffboardSyncGoto::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
     RCLCPP_INFO(get_logger(), "END_TRAJ: hold at [%.2f, %.2f, %.2f] and prepare for landing after wait",
                 end_traj_x_, end_traj_y_, end_traj_z_);
   } else if (cmd_state == SyncFsmState::LAND) {
-    land_x_ = current_x_;
-    land_y_ = current_y_;
-    Eigen::Vector3d p_target(land_x_, land_y_, 0.0);
-    start_mjerk_segment(p_target, 3.0);
+    if (!end_traj_target_ready_) {
+      RCLCPP_ERROR(get_logger(), "LAND: END_TRAJ point unavailable, cannot start landing");
+      return;
+    }
+    land_x_ = end_traj_x_;
+    land_y_ = end_traj_y_;
+    Eigen::Vector3d p_start(end_traj_x_, end_traj_y_, end_traj_z_);
+    Eigen::Vector3d p_target(end_traj_x_, end_traj_y_, 0.0);
+    start_mjerk_segment_from(p_start, p_target, 3.0);
     current_state_ = SyncFsmState::LAND;
-    RCLCPP_WARN(get_logger(), "Received LAND command, descending");
+    RCLCPP_WARN(get_logger(), "Received LAND command, vertical descent");
   }
 }
 
@@ -362,6 +367,17 @@ void OffboardSyncGoto::start_mjerk_segment(const Eigen::Vector3d& p_target,
   // Position-only minimum-jerk keeps a straight-line path in 3D.
   active_seg_ = SyncMJerkSegment::build(
       p0, zero, zero, p_target, zero, zero, duration, now());
+  has_final_setpoint_ = false;
+  final_setpoint_hold_count_ = 0;
+}
+
+void OffboardSyncGoto::start_mjerk_segment_from(const Eigen::Vector3d& p_start,
+                                                const Eigen::Vector3d& p_target,
+                                                double duration)
+{
+  const Eigen::Vector3d zero = Eigen::Vector3d::Zero();
+  active_seg_ = SyncMJerkSegment::build(
+      p_start, zero, zero, p_target, zero, zero, duration, now());
   has_final_setpoint_ = false;
   final_setpoint_hold_count_ = 0;
 }
@@ -574,15 +590,18 @@ void OffboardSyncGoto::timer_cb()
       if (end_traj_timer_started_) {
         double elapsed = (now() - end_traj_start_time_).seconds();
         if (elapsed >= end_traj_wait_time_ && !active_seg_.has_value()) {
-          double land_target_x = end_traj_target_ready_ ? end_traj_x_ : current_x_;
-          double land_target_y = end_traj_target_ready_ ? end_traj_y_ : current_y_;
-          land_x_ = land_target_x;
-          land_y_ = land_target_y;
-          Eigen::Vector3d p_target(land_target_x, land_target_y, 0.0);
-          start_mjerk_segment(p_target, landing_time_s_);
+          if (!end_traj_target_ready_) {
+            RCLCPP_ERROR(get_logger(), "END_TRAJ landing: END_TRAJ point unavailable, skipping auto-landing");
+            break;
+          }
+          land_x_ = end_traj_x_;
+          land_y_ = end_traj_y_;
+          Eigen::Vector3d p_start(end_traj_x_, end_traj_y_, end_traj_z_);
+          Eigen::Vector3d p_target(end_traj_x_, end_traj_y_, 0.0);
+          start_mjerk_segment_from(p_start, p_target, landing_time_s_);
           current_state_ = SyncFsmState::LAND;
           RCLCPP_INFO(get_logger(),
-                      "END_TRAJ wait done (%.1fs), auto-landing over %.1fs",
+                      "END_TRAJ wait done (%.1fs), vertical auto-landing over %.1fs",
                       elapsed, landing_time_s_);
         }
       }
