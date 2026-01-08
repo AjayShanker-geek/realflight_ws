@@ -172,6 +172,7 @@ private:
   bool vel_initialized_;
   bool has_final_setpoint_;
   int final_setpoint_hold_count_;
+  rclcpp::Time last_landing_traj_time_;
   
   // Current position from odometry
   double current_x_;
