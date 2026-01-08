@@ -337,7 +337,8 @@ void OffboardSyncGoto::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
 void OffboardSyncGoto::send_vehicle_cmd(uint16_t cmd, float p1, float p2)
 {
   VehicleCommand msg{};
-  msg.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  // msg.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  msg.timestamp = 0;
   msg.param1 = p1;
   msg.param2 = p2;
   msg.command = cmd;
@@ -395,8 +396,8 @@ void OffboardSyncGoto::publish_offboard_mode()
     m.body_rate    = false;
   } else if (has_active_seg) {
     m.position     = true;
-    m.velocity     = false;
-    m.acceleration = false;
+    m.velocity     = true;
+    m.acceleration = true;
     m.attitude     = false;
     m.body_rate    = false;
   } else {
@@ -406,14 +407,16 @@ void OffboardSyncGoto::publish_offboard_mode()
     m.attitude     = false;
     m.body_rate    = false;
   }
-  m.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  // m.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  m.timestamp = 0;
   pub_offb_mode_->publish(m);
 }
 
 void OffboardSyncGoto::publish_current_setpoint()
 {
   TrajectorySetpoint sp{};
-  sp.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  // sp.timestamp = offboard_utils::get_timestamp_us(get_clock());
+  sp.timestamp = 0;
   sp.yaw = 3.1415926f;
   sp.yawspeed = 0.0f;
 

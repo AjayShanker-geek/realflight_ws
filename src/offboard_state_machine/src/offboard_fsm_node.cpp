@@ -170,6 +170,7 @@ OffboardFSM::OffboardFSM(int drone_id)
 , vel_initialized_(false)
 , has_final_setpoint_(false)
 , final_setpoint_hold_count_(0)
+, last_landing_traj_time_(0, 0, RCL_ROS_TIME)
 , hover_x_(0.0)
 , hover_y_(0.0)
 , hover_z_(-1.2)
@@ -282,6 +283,7 @@ void OffboardFSM::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
     start_mjerk_segment(p_target, landing_time_s_, 
                        Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
                        landing_max_vel_);
+    last_landing_traj_time_ = now();
     RCLCPP_INFO(get_logger(), "Manual LAND from [%.2f, %.2f, %.2f]", 
                 landing_x_, landing_y_, -landing_start_z_);
   }
@@ -433,6 +435,7 @@ void OffboardFSM::publish_current_setpoint()
   }
   
   TrajectorySetpoint sp;
+  const uint64_t ts = get_timestamp_us();
   
   for (int i = 0; i < 3; ++i) {
     sp.position[i] = std::nanf("");
@@ -449,6 +452,8 @@ void OffboardFSM::publish_current_setpoint()
     const double GROUND_TOLERANCE = 0.05;
     if (p.z() > GROUND_TOLERANCE) {
       RCLCPP_ERROR(get_logger(), "z=%.3f corrected", p.z());
+    }
+    if (p.z() > 0.0) {
       p.z() = 0.0;
       v.z() = 0.0;
       a.z() = 0.0;
@@ -614,7 +619,7 @@ void OffboardFSM::publish_current_setpoint()
     sp.velocity[2] = 0.0f;
   }
   
-  sp.timestamp = 0;
+  sp.timestamp = ts;
   pub_traj_sp_->publish(sp);
 }
 
@@ -789,6 +794,7 @@ void OffboardFSM::timer_cb()
       start_mjerk_segment(p_target, landing_time_s_, 
                          Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
                          landing_max_vel_);
+      last_landing_traj_time_ = now();
       
       current_state_ = FsmState::LAND;
       RCLCPP_INFO(get_logger(), 
@@ -802,6 +808,21 @@ void OffboardFSM::timer_cb()
   case FsmState::LAND: {
     if (!active_seg_.has_value()) {
       double alt = -current_z_;
+      const double REPLAN_ALT_THRESH = 0.25;
+      const double MIN_REPLAN_DT = 0.5;
+      double since_last = (now() - last_landing_traj_time_).seconds();
+
+      if (alt > REPLAN_ALT_THRESH && since_last > MIN_REPLAN_DT) {
+        Eigen::Vector3d p_target(landing_x_, landing_y_, 0.0);
+        start_mjerk_segment(p_target, landing_time_s_,
+                            Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(),
+                            landing_max_vel_);
+        last_landing_traj_time_ = now();
+        RCLCPP_WARN(get_logger(),
+                    "Landing replan: alt=%.2f m still above %.2f m", alt, REPLAN_ALT_THRESH);
+        break;
+      }
+
       if (alt <= 0.1) {
         RCLCPP_INFO(get_logger(), "Landed");
         current_state_ = FsmState::DONE;
@@ -842,8 +863,8 @@ void OffboardFSM::publish_offboard_mode()
     m.body_rate    = false;
   } else if (has_active_seg) {
     m.position     = true;
-    m.velocity     = false;
-    m.acceleration = false;
+    m.velocity     = true;
+    m.acceleration = true;
     m.attitude     = false;
     m.body_rate    = false;
   } else {
@@ -854,7 +875,7 @@ void OffboardFSM::publish_offboard_mode()
     m.body_rate    = false;
   }
   
-  m.timestamp = 0;
+  m.timestamp = get_timestamp_us();
   pub_offb_mode_->publish(m);
 }
 
