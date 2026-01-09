@@ -72,6 +72,14 @@ def safe_derivative(values: np.ndarray, t: np.ndarray) -> np.ndarray:
     out = np.full_like(values, np.nan, dtype=float)
     if values.size < 2 or t.size != values.size:
         return out
+    # Guard against repeated timestamps (dt=0) which cause huge spikes.
+    dt = np.diff(t)
+    mask = np.concatenate([[True], dt > 0.0])
+    if not mask.all():
+        values = values[mask]
+        t = t[mask]
+        if values.size < 2:
+            return out
     deriv = np.gradient(values, t)
     deriv[~np.isfinite(deriv)] = np.nan
     return deriv
@@ -88,27 +96,54 @@ def vec_from_prefix(data: np.ndarray, prefix: str, suffix: str = "") -> Tuple[np
 def jerk_from_acc(data: np.ndarray) -> np.ndarray:
     t = data["t"]
     ax, ay, az = vec_from_prefix(data, "acc")
+    mask = np.ones_like(t, dtype=bool)
+    dt = np.diff(t)
+    if dt.size:
+        mask = np.concatenate([[True], dt > 0.0])
+    if not mask.all():
+        t = t[mask]
+        ax = ax[mask]
+        ay = ay[mask]
+        az = az[mask]
     jx = safe_derivative(ax, t)
     jy = safe_derivative(ay, t)
     jz = safe_derivative(az, t)
-    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1)
+    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1), t
 
 
-def jerk_from_velocity(data: np.ndarray, prefix: str, suffix: str = "") -> np.ndarray:
+def jerk_from_velocity(data: np.ndarray, prefix: str, suffix: str = "") -> Tuple[np.ndarray, np.ndarray]:
     t = data["t"]
     vx, vy, vz = vec_from_prefix(data, prefix, suffix)
+    mask = np.ones_like(t, dtype=bool)
+    dt = np.diff(t)
+    if dt.size:
+        mask = np.concatenate([[True], dt > 0.0])
+    if not mask.all():
+        t = t[mask]
+        vx = vx[mask]
+        vy = vy[mask]
+        vz = vz[mask]
     ax = safe_derivative(vx, t)
     ay = safe_derivative(vy, t)
     az = safe_derivative(vz, t)
     jx = safe_derivative(ax, t)
     jy = safe_derivative(ay, t)
     jz = safe_derivative(az, t)
-    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1)
+    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1), t
 
 
-def jerk_from_position(data: np.ndarray, prefix: str, suffix: str = "") -> np.ndarray:
+def jerk_from_position(data: np.ndarray, prefix: str, suffix: str = "") -> Tuple[np.ndarray, np.ndarray]:
     t = data["t"]
     px, py, pz = vec_from_prefix(data, prefix, suffix)
+    mask = np.ones_like(t, dtype=bool)
+    dt = np.diff(t)
+    if dt.size:
+        mask = np.concatenate([[True], dt > 0.0])
+    if not mask.all():
+        t = t[mask]
+        px = px[mask]
+        py = py[mask]
+        pz = pz[mask]
     vx = safe_derivative(px, t)
     vy = safe_derivative(py, t)
     vz = safe_derivative(pz, t)
@@ -118,10 +153,10 @@ def jerk_from_position(data: np.ndarray, prefix: str, suffix: str = "") -> np.nd
     jx = safe_derivative(ax, t)
     jy = safe_derivative(ay, t)
     jz = safe_derivative(az, t)
-    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1)
+    return np.linalg.norm(np.vstack([jx, jy, jz]).T, axis=1), t
 
 
-def actual_jerk(data: np.ndarray) -> np.ndarray:
+def actual_jerk(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     names = data.dtype.names
     if "payload_vx_enu" in names:
         return jerk_from_velocity(data, "payload_v", "_enu")
@@ -530,14 +565,12 @@ def plot_jerk(data_list: List[Tuple[str, np.ndarray]]) -> None:
     has_any = False
     for name, data in data_list:
         if "acc_x" in data.dtype.names:
-            t = data["t"]
-            jerk_cmd = jerk_from_acc(data)
-            ax.plot(t, jerk_cmd, label=f"{name} jerk_cmd")
+            jerk_cmd, t_cmd = jerk_from_acc(data)
+            ax.plot(t_cmd, jerk_cmd, label=f"{name} jerk_cmd")
             has_any = True
         if "payload_x_enu" in data.dtype.names or "odom_x" in data.dtype.names:
-            t = data["t"]
-            jerk_act = actual_jerk(data)
-            ax.plot(t, jerk_act, label=f"{name} jerk_actual")
+            jerk_act, t_act = actual_jerk(data)
+            ax.plot(t_act, jerk_act, label=f"{name} jerk_actual")
             has_any = True
     if not has_any:
         plt.close(fig)
@@ -548,9 +581,95 @@ def plot_jerk(data_list: List[Tuple[str, np.ndarray]]) -> None:
     fig.tight_layout()
 
 
+def quat_to_euler_deg(qw: np.ndarray, qx: np.ndarray, qy: np.ndarray, qz: np.ndarray) -> np.ndarray:
+    # Returns roll, pitch, yaw in degrees (ZYX intrinsic).
+    # Assumes arrays are broadcastable.
+    import numpy as np
+    q0, q1, q2, q3 = qw, qx, qy, qz
+    # roll (x-axis rotation)
+    sinr_cosp = 2 * (q0 * q1 + q2 * q3)
+    cosr_cosp = 1 - 2 * (q1 * q1 + q2 * q2)
+    roll = np.degrees(np.arctan2(sinr_cosp, cosr_cosp))
+    # pitch (y-axis rotation)
+    sinp = 2 * (q0 * q2 - q3 * q1)
+    pitch = np.degrees(np.where(np.abs(sinp) >= 1,
+                                np.sign(sinp) * (np.pi / 2),
+                                np.arcsin(sinp)))
+    # yaw (z-axis rotation)
+    siny_cosp = 2 * (q0 * q3 + q1 * q2)
+    cosy_cosp = 1 - 2 * (q2 * q2 + q3 * q3)
+    yaw = np.degrees(np.arctan2(siny_cosp, cosy_cosp))
+    return np.vstack([roll, pitch, yaw]).T
+
+
+def plot_attitude(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    axes[0].set_title("Payload attitude (ENU Euler, deg)")
+    has_any = False
+    for name, data in data_list:
+        names = data.dtype.names
+        needed = all(k in names for k in (
+            "payload_qw_enu", "payload_qx_enu", "payload_qy_enu", "payload_qz_enu",
+            "payload_des_qw", "payload_des_qx", "payload_des_qy", "payload_des_qz"))
+        if not needed:
+            continue
+        t = data["t"]
+        e_meas = quat_to_euler_deg(data["payload_qw_enu"], data["payload_qx_enu"],
+                                   data["payload_qy_enu"], data["payload_qz_enu"])
+        e_des = quat_to_euler_deg(data["payload_des_qw"], data["payload_des_qx"],
+                                  data["payload_des_qy"], data["payload_des_qz"])
+        labels = ["roll", "pitch", "yaw"]
+        for i, ax in enumerate(axes):
+            ax.plot(t, e_meas[:, i], label=f"{name} {labels[i]}")
+            ax.plot(t, e_des[:, i], linestyle="--", label=f"{name} {labels[i]}_des")
+            ax.set_ylabel(labels[i] + " [deg]")
+            ax.grid(True)
+        has_any = True
+    if not has_any:
+        plt.close(fig)
+        return
+    axes[-1].set_xlabel("time [s]")
+    axes[0].legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+
+
+def plot_delta_p(data_list: List[Tuple[str, np.ndarray]]) -> None:
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    axes[0].set_title("Delta p (raw vs smoothed) [NED]")
+    has_any = False
+    for name, data in data_list:
+        names = data.dtype.names
+        if not all(k in names for k in ("delta_p_raw_x", "delta_p_raw_y", "delta_p_raw_z",
+                                        "delta_p_sm_x", "delta_p_sm_y", "delta_p_sm_z")):
+            continue
+        t = data["t"]
+        for ax, axis in zip(axes, ["x", "y", "z"]):
+            ax.plot(t, data[f"delta_p_raw_{axis}"], label=f"{name} raw_{axis}")
+            ax.plot(t, data[f"delta_p_sm_{axis}"], linestyle="--", label=f"{name} sm_{axis}")
+            ax.set_ylabel(axis + " [m]")
+            ax.grid(True)
+        has_any = True
+    if not has_any:
+        plt.close(fig)
+        return
+    axes[-1].set_xlabel("time [s]")
+    axes[0].legend(ncol=2, fontsize=8)
+    fig.tight_layout()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot PVA logs (single or multi-drone)")
-    parser.add_argument("path", help="CSV log file or base log directory")
+    cwd = Path(__file__).resolve().parent.parent.parent  # repo root (assuming tools/.../pva_plot_log.py)
+    default_base = cwd / "sitl_log"
+    default_path = default_base
+    try:
+        if default_base.exists():
+            latest = find_latest_run_dir(default_base)
+            default_path = latest
+    except Exception:
+        default_path = default_base
+    parser.add_argument("path", nargs="?", default=str(default_path),
+                        help="CSV log file or base log directory (default: latest under ./sitl_log/)")
     args = parser.parse_args()
 
     data_list = load_multi(Path(args.path))
@@ -562,6 +681,8 @@ def main() -> None:
     plot_ff_acc_3d_multi(data_list)
     plot_feedback(data_list)
     plot_jerk(data_list)
+    plot_attitude(data_list)
+    plot_delta_p(data_list)
     plt.show()
 
 
