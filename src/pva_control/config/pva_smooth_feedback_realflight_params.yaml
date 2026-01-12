@@ -1,0 +1,33 @@
+/**:
+  ros__parameters:
+    mode: "realflight"
+    payload_input: "pose"
+    use_payload_stamp_time: false
+    data_root: "data/realflight_traj_new"
+    use_raw_traj: false
+    trajectory_csv: ""
+    cable_csv: ""
+    payload_csv: ""
+    kfb_csv: ""
+    timer_period: 0.01
+    payload_pose_topic: "/vrpn_mocap/multilift_payload/pose"
+    payload_mass: 0.150
+    payload_added_mass: 0.10
+    payload_rp: [0.0, 0.07, 0.0]
+    payload_radius: 0.125
+    cable_length: 1.0
+    feedforward_weight: 1.0
+    feedback_weight: 1.0
+    alpha_gain: 0.1
+    yaw_setpoint: 3.141592653589793
+    payload_is_enu: true
+    delta_p_max: 0.05
+    j_max: 35.0
+    omega: 5.0
+    enable_log: false
+    log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
+    enable_debug_log: false
+    debug_log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
+    debug_log_period: 0.2
+    drone_mass: 0.32
+    use_wall_timer: true

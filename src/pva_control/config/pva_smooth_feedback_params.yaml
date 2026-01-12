@@ -1,0 +1,32 @@
+/**:
+  ros__parameters:
+    mode: "sitl"
+    payload_input: "odom"
+    use_payload_stamp_time: true
+    data_root: "data/realflight_traj_new_H (m2=0.1,rg=[0,0.028])"
+    use_raw_traj: false
+    trajectory_csv: ""
+    cable_csv: ""
+    payload_csv: ""
+    kfb_csv: ""
+    timer_period: 0.01
+    payload_odom_topic: "/payload_odom"
+    payload_mass: 0.150
+    payload_added_mass: 0.10
+    payload_rp: [0.0, 0.07, 0.0]
+    payload_radius: 0.125
+    cable_length: 1.0
+    feedforward_weight: 1.0
+    alpha_gain: 1.0
+    yaw_setpoint: 3.141592653589793
+    payload_is_enu: true
+    delta_p_max: 0.08
+    j_max: 45.0
+    omega: 8.0
+    enable_log: true
+    log_path: "/home/carlson/ros2/realflight_ws/sitl_log"
+    enable_debug_log: false
+    debug_log_path: "/home/carlson/ros2/realflight_ws/sitl_log"
+    debug_log_period: 0.2
+    drone_mass: 0.25
+    use_wall_timer: true

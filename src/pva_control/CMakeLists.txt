@@ -47,6 +47,34 @@ ament_target_dependencies(pva_feedback_control_node
 )
 target_link_libraries(pva_feedback_control_node Eigen3::Eigen)
 
+# add_executable(pva_bounded_feedback_control_node
+#   src/pva_bounded_feedback_control_node.cpp
+# )
+
+# ament_target_dependencies(pva_bounded_feedback_control_node
+#   rclcpp
+#   std_msgs
+#   px4_msgs
+#   geometry_msgs
+#   nav_msgs
+#   offboard_state_machine
+# )
+# target_link_libraries(pva_bounded_feedback_control_node Eigen3::Eigen)
+
+add_executable(pva_smooth_feedback_control_node
+  src/pva_smooth_feedback_control_node.cpp
+)
+
+ament_target_dependencies(pva_smooth_feedback_control_node
+  rclcpp
+  std_msgs
+  px4_msgs
+  geometry_msgs
+  nav_msgs
+  offboard_state_machine
+)
+target_link_libraries(pva_smooth_feedback_control_node Eigen3::Eigen)
+
 install(DIRECTORY include/
   DESTINATION include
 )
@@ -58,6 +86,8 @@ install(DIRECTORY launch config
 install(TARGETS
   pva_control_node
   pva_feedback_control_node
+  # pva_bounded_feedback_control_node
+  pva_smooth_feedback_control_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
