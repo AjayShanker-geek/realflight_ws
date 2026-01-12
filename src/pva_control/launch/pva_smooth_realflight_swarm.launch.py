@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Launch smooth-feedback PVA control nodes for realflight swarm.
+Launch smooth-feedback PVA control node for realflight (one node per DRONE_ID)
+plus the swarm GOTO/TRAJ coordinator. Mirrors pva_realflight_sync.launch.py but
+uses the smooth feedback controller and no state machine.
 """
 
 import os
@@ -56,6 +58,9 @@ def make_nodes(context):
   params_file_path = LaunchConfiguration("params_file").perform(context)
   traj_base_dir = LaunchConfiguration("traj_base_dir").perform(context)
   use_params_data_root = LaunchConfiguration("use_params_data_root").perform(context).lower() in ("1", "true", "yes")
+  use_raw_traj = LaunchConfiguration("use_raw_traj").perform(context).lower() in ("1", "true", "yes")
+  takeoff_alt = float(LaunchConfiguration("takeoff_alt").perform(context))
+  alt_tol = float(LaunchConfiguration("alt_tol").perform(context))
 
   if drone_ids_raw:
     drone_ids = [int(x.strip()) for x in drone_ids_raw.split(",") if x.strip()]
@@ -64,32 +69,57 @@ def make_nodes(context):
   if len(drone_ids) != total:
     raise ValueError(f"Mismatch: drone_ids has {len(drone_ids)} IDs but total_drones={total}")
 
+  this_drone_id = int(os.environ.get("DRONE_ID", "0"))
+  if this_drone_id not in drone_ids:
+    raise ValueError(f"DRONE_ID={this_drone_id} not found in drone_ids={drone_ids}")
+
   if use_params_data_root:
     data_root = read_data_root(params_file_path)
     if data_root:
       traj_base_dir = data_root
 
-  nodes = [
-    LogInfo(msg=f"Starting smooth PVA REALFLIGHT swarm with {total} drones")
-  ]
+  override = {"use_raw_traj": use_raw_traj}
+  if traj_base_dir:
+    override["data_root"] = traj_base_dir
+  params = [params_file, override]
 
-  for drone_id in drone_ids:
-    override = {
-      "use_raw_traj": LaunchConfiguration("use_raw_traj").perform(context).lower() in ("1", "true", "yes"),
-    }
-    if traj_base_dir:
-      override["data_root"] = traj_base_dir
-    params = [params_file, override]
-    nodes.append(
-      Node(
-        package="pva_control",
-        executable="pva_smooth_feedback_control_node",
-        name=f"pva_smooth_realflight_{drone_id}",
-        output="screen",
-        arguments=[str(drone_id), str(total)],
-        parameters=params,
+  nodes = []
+
+  nodes.append(
+    Node(
+      package="pva_control",
+      executable="pva_smooth_feedback_control_node",
+      name=f"pva_smooth_realflight_{this_drone_id}",
+      output="screen",
+      arguments=[str(this_drone_id), str(total)],
+      parameters=params,
+    )
+  )
+
+  nodes.append(
+    Node(
+      package="traj_test",
+      executable="swarm_goto_coordinator_node",
+      name=f"swarm_goto_coordinator_{this_drone_id}",
+      output="screen",
+      parameters=[{
+        "total_drones": total,
+        "drone_ids": drone_ids,
+        "takeoff_alt": takeoff_alt,
+        "alt_tol": alt_tol,
+      }],
+    )
+  )
+
+  nodes.append(
+    LogInfo(
+      msg=(
+        f"Drone {this_drone_id}: launching smooth PVA realflight + goto/TRAJ "
+        f"coordinator (swarm: {drone_ids}, total: {total})"
       )
     )
+  )
+
   return nodes
 
 
@@ -115,5 +145,9 @@ def generate_launch_description():
                           description="Override traj_base_dir from params_file data_root"),
     DeclareLaunchArgument("use_raw_traj", default_value="false",
                           description="Use *_traj_raw_20hz.csv instead of smoothed CSVs"),
+    DeclareLaunchArgument("takeoff_alt", default_value="0.4",
+                          description="Takeoff altitude to gate GOTO (meters, positive up)"),
+    DeclareLaunchArgument("alt_tol", default_value="0.05",
+                          description="Altitude tolerance for GOTO gating (meters)"),
     OpaqueFunction(function=make_nodes),
   ])

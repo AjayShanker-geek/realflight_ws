@@ -3,7 +3,7 @@
     mode: "realflight"
     payload_input: "pose"
     use_payload_stamp_time: false
-    data_root: "data/realflight_traj_new"
+    data_root: "data/realflight_traj_new_H (m2=0.1,rg=[0,0.028])"
     use_raw_traj: false
     trajectory_csv: ""
     cable_csv: ""
