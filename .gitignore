@@ -21,6 +21,11 @@ raw_data/
 
 # logs
 *log
+*logs/
+
+#temporary
+tmp/
+temp/
 
 # unused packages
 src/geom_multilift/
