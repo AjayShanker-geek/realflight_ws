@@ -284,8 +284,8 @@ void ViconPX4Bridge::publishToPX4(const geometry_msgs::msg::Pose& pose_output,
 {
     px4_msgs::msg::VehicleOdometry odom_msg;
     
-    // Set timestamp (PX4 uses microseconds)
-    odom_msg.timestamp = timestamp.nanoseconds() / 1000;
+    // Set timestamp (PX4 uses microseconds): reference from mocap_px4_bridge 
+    odom_msg.timestamp = uint64_t(timestamp.seconds())*1000000 + uint64_t(timestamp.nanoseconds())/1000;
     odom_msg.timestamp_sample = odom_msg.timestamp;
     
     // Set pose frame to NED (local frame) - PX4 always expects NED
