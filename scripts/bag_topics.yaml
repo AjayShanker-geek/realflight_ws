@@ -1,0 +1,25 @@
+# Default topic set for scripts/record_bag_from_yaml.sh
+# - Override drone_ids at runtime with DRONE_IDS env (e.g. DRONE_IDS="1,2,3")
+# - Add/remove topics as needed for your experiment
+
+# Per-drone expansion is only for drones with the PX4 namespace prefix (/px4_<id>/fmu/),
+# because drone 0 uses /fmu/ without the px4_<id> prefix.
+drone_ids: [1,2]
+
+common_topics:
+  # Payload pose used by pva_feedback (see payload_pose_topic param)
+  - /vrpn_mocap/multilift_payload/pose
+  - /vrpn_mocap/multilift_payload/twist
+  - /vrpn_mocap/multilift_payload/accel
+  # Drone 0 odometry / position (no px4_<id> prefix)
+  - /fmu/out/vehicle_odometry
+  # State machine topics for drone 0 (no prefix)
+  - /state/state_drone_0
+  - /state/command_drone_0
+
+per_drone_topics:
+  # Odometry / position for drones with PX4 namespaces (/px4_<id>/fmu/)
+  - /px4_{id}/fmu/out/vehicle_odometry
+  # State machine state + commands for each drone
+  - /state/state_drone_{id}
+  - /state/command_drone_{id}
