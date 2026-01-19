@@ -24,10 +24,10 @@
     delta_p_max: 0.05
     j_max: 35.0
     omega: 5.0
-    enable_log: false
-    log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
+    enable_log: true
+    log_path: "/home/radxa/realflight_ws/realflight_log"
     enable_debug_log: false
-    debug_log_path: "/home/carlson/ros2/realflight_ws/realflight_log"
+    debug_log_path: "/home/radxa/realflight_ws/realflight_log"
     debug_log_period: 0.2
     drone_mass: 0.32
     use_wall_timer: true
