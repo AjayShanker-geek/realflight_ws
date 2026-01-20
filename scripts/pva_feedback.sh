@@ -90,6 +90,22 @@ STATE_STATE_TOPIC="/state/state_drone_${DRONE_ID}"
 TRAJ_TOPIC="${PX4_NAMESPACE}in/trajectory_setpoint"
 LOCAL_POS_TOPIC="${PX4_NAMESPACE}out/vehicle_local_position"
 
+# Build rosbag topic list; add payload mocap feeds when DRONE_ID=2
+BAG_TOPICS=(
+  "${STATE_CMD_TOPIC}"
+  "${STATE_STATE_TOPIC}"
+  "${TRAJ_TOPIC}"
+  "${LOCAL_POS_TOPIC}"
+)
+if [[ "$DRONE_ID" -eq 2 ]]; then
+  BAG_TOPICS+=(
+    "/vrpn_mocap/multilift_payload/pose"
+    "/vrpn_mocap/multilift_payload/twist"
+    "/vrpn_mocap/multilift_payload/accel"
+  )
+fi
+BAG_TOPICS_STR="${BAG_TOPICS[*]}"
+
 # tmux session for smooth PVA, state machine, and rosbag
 tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
 tmux new-session -d -s "$SESSION_NAME" -c "$WS_DIR"
@@ -117,8 +133,8 @@ BAG_PATH="${BAG_DIR}/drone_${DRONE_ID}_$(date +%Y%m%d_%H%M%S)"
 tmux send-keys -t "$RECORD_PANE" "cd $WS_DIR" C-m
 tmux send-keys -t "$RECORD_PANE" "source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
 tmux send-keys -t "$RECORD_PANE" "echo \"Recording ROS 2 bag for drone ${DRONE_ID}\"" C-m
-tmux send-keys -t "$RECORD_PANE" "echo \"Topics:\"; echo \"  - ${STATE_CMD_TOPIC}\"; echo \"  - ${STATE_STATE_TOPIC}\"; echo \"  - ${TRAJ_TOPIC}\"; echo \"  - ${LOCAL_POS_TOPIC}\"" C-m
+tmux send-keys -t "$RECORD_PANE" "echo \"Topics:\"; for t in ${BAG_TOPICS_STR}; do echo \"  - \$t\"; done" C-m
 tmux send-keys -t "$RECORD_PANE" "echo \"Output: ${BAG_PATH}\"" C-m
-tmux send-keys -t "$RECORD_PANE" "ros2 bag record -o ${BAG_PATH} ${STATE_CMD_TOPIC} ${STATE_STATE_TOPIC} ${TRAJ_TOPIC} ${LOCAL_POS_TOPIC}" C-m
+tmux send-keys -t "$RECORD_PANE" "ros2 bag record -o ${BAG_PATH} ${BAG_TOPICS_STR}" C-m
 
 tmux attach-session -t "$SESSION_NAME"
