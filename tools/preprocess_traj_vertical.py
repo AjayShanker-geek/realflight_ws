@@ -22,9 +22,7 @@ REPO_ROOT = FILE_DIR.parent
 CONFIG_PATH = FILE_DIR / "preprocess_traj_vertical.yaml"
 SCENARIO_DIR = (
     REPO_ROOT
-    / "raw_data"
-    / "3quad_traj"
-    / "Planning_plots_multiagent_meta_evaluation_COM_Dyn_V(m2=0.1,rg=[0.022,0.016])"
+    / Path("raw_data/Planning_plots_multiagent_meta_evaluation_COM_Dyn_V (m2=0.1,rg=[0.03,0],4.6rq)")
 )
 
 
@@ -66,10 +64,59 @@ def _parse_bool(config: dict, key: str, default: bool = False) -> bool:
     return default
 
 
+def _parse_int(config: dict, key: str) -> Optional[int]:
+    value = config.get(key)
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
 class DataLoaderVertical:
     """
     Load planned trajectory data for the COM_Dyn_V evaluation.
     """
+
+    @staticmethod
+    def _extract_suffix(file_path: Path, prefix: str) -> str:
+        name = file_path.name
+        prefix_with_sep = f"{prefix}_"
+        if name.startswith(prefix_with_sep):
+            return name[len(prefix_with_sep):]
+        return name
+
+    def _find_traj_file(
+        self,
+        prefix: str,
+        num_drones: Optional[int],
+        suffix_hint: Optional[str] = None,
+    ) -> Path:
+        """
+        Locate the first matching trajectory file for the given prefix.
+        Priority: exact suffix_hint (if provided) -> num_drones-specific -> any.
+        """
+        if suffix_hint:
+            suffix_clean = suffix_hint
+            if suffix_clean.startswith(f"{prefix}_"):
+                suffix_clean = suffix_clean[len(prefix) + 1 :]
+            suffix_clean = suffix_clean.lstrip("_")
+            if not suffix_clean.endswith(".npy"):
+                suffix_clean = f"{suffix_clean}.npy"
+            candidate = self.path / f"{prefix}_{suffix_clean}"
+            if candidate.exists():
+                return candidate
+        patterns = []
+        if num_drones is not None:
+            patterns.append(f"{prefix}_*_a_{num_drones}.npy")
+        patterns.append(f"{prefix}_*_a_*.npy")
+        for pattern in patterns:
+            matches = sorted(self.path.glob(pattern))
+            if matches:
+                return matches[0]
+        hint = suffix_hint or f"* (num_drones={num_drones or 'any'})"
+        raise FileNotFoundError(f"No {prefix} file matching {hint} in {self.path}")
 
     def __init__(self, scenario_dir: Optional[Path] = None):
         if scenario_dir is None:
@@ -89,6 +136,8 @@ class DataLoaderVertical:
         self.payload_attitude_identity = False
 
         config = read_config(CONFIG_PATH)
+        self.num_drones_config = _parse_int(config, "num_drones")
+        self.traj_suffix = None
         dt_val = _parse_float(config, "dt")
         if dt_val is not None:
             self.dt = dt_val
@@ -103,20 +152,28 @@ class DataLoaderVertical:
         elif rl_val is not None:
             self.rl = rl_val
 
-        self.xl_traj = np.load(self.path / "xl_traj_0_3_a_3.npy", allow_pickle=True)
-        self.payload_x = self.xl_traj[:, 0:3]
-        self.payload_v = self.xl_traj[:, 3:6]
-        self.payload_q = self.xl_traj[:, 6:10]
-        self.payload_w = self.xl_traj[:, 10:13]
-
-        self.xq_traj = np.load(self.path / "xq_traj_0_3_a_3.npy", allow_pickle=True)
+        xq_file = self._find_traj_file("xq_traj", self.num_drones_config, config.get("traj_suffix"))
+        self.traj_suffix = self._extract_suffix(xq_file, "xq_traj")
+        self.xq_traj = np.load(xq_file, allow_pickle=True)
         self.num_drones = self.xq_traj.shape[0]
+        if self.num_drones_config is not None and self.num_drones_config != self.num_drones:
+            raise ValueError(
+                f"Configured num_drones={self.num_drones_config} but data has {self.num_drones} drones ({xq_file.name})"
+            )
         self.alpha = 2 * math.pi / self.num_drones
         self.cable_direction = self.xq_traj[:, :, 0:3]
         self.cable_omega = self.xq_traj[:, :, 3:6]
         self.cable_omega_dot = self.xq_traj[:, :, 6:9]
         self.cable_mu = self.xq_traj[:, :, 12]
         self.cable_mu_dot = self.xq_traj[:, :, 13]
+        self.kfb_path = self._find_traj_file("Kfb_traj", self.num_drones, self.traj_suffix)
+
+        xl_file = self._find_traj_file("xl_traj", self.num_drones, self.traj_suffix)
+        self.xl_traj = np.load(xl_file, allow_pickle=True)
+        self.payload_x = self.xl_traj[:, 0:3]
+        self.payload_v = self.xl_traj[:, 3:6]
+        self.payload_q = self.xl_traj[:, 6:10]
+        self.payload_w = self.xl_traj[:, 10:13]
 
 
 class TrajectoryConverterVertical:
@@ -1037,7 +1094,7 @@ class TrajectoryConverterVertical:
         )
 
         # Kfb gains (upsampled to match time_dense)
-        kfb_path = self.loader.path / "Kfb_traj_0_3_a_3.npy"
+        kfb_path = self.loader.kfb_path
         if not kfb_path.exists():
             print(f"ERROR: Kfb file not found: {kfb_path}", file=sys.stderr)
             raise FileNotFoundError(f"Kfb file not found: {kfb_path}")

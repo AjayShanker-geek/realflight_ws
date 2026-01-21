@@ -21,6 +21,7 @@
 # ============================================================================
 
 set -e  # Exit on any error
+DRONE_ID="${DRONE_ID:-0}"
 
 # ============================================================================
 # Environment Variable Validation
@@ -69,6 +70,7 @@ fi
 echo "GCS_IP: $GCS_IP"
 echo "DRONE_NAME_VICON: $DRONE_NAME_VICON"
 echo "VICON_IP: $VICON_IP"
+echo "DRONE_ID: $DRONE_ID (only drone 0 launches vrpn_mocap)"
 echo "======================================"
 echo ""
 
@@ -143,8 +145,12 @@ echo ""
 echo "======================================"
 echo "Starting VRPN/Vicon Client..."
 echo "======================================"
-VICON_CLIENT_CMD="ros2 launch vrpn_mocap client.launch.yaml server:=$VICON_IP port:=3883"
-start_screen_session "vicon_client" "$VICON_CLIENT_CMD"
+if [[ "$DRONE_ID" == "0" ]]; then
+    VICON_CLIENT_CMD="ros2 launch vrpn_mocap client.launch.yaml server:=$VICON_IP port:=3883"
+    start_screen_session "vicon_client" "$VICON_CLIENT_CMD"
+else
+    echo "Skipping VRPN/Vicon Client because DRONE_ID=$DRONE_ID (only drone 0 should publish mocap)."
+fi
 
 # ============================================================================
 # Module 4: Vicon to PX4 Bridge
