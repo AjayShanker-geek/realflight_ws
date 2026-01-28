@@ -159,12 +159,12 @@ start_screen_session "qgc_forward" "$QGC_FORWARD_CMD"
 # - Reads: Vicon pose from vrpn_mocap
 # - Publishes: Vision-based position estimate to PX4
 # - Handles: Frame transformations (ENU/NED/FLU conversions)
-echo ""
-echo "======================================"
-echo "Starting Vicon-PX4 Bridge..."
-echo "======================================"
-VICON_BRIDGE_CMD="ros2 launch vicon_px4_bridge vicon_px4_bridge.launch.py"
-start_screen_session "vicon_bridge" "$VICON_BRIDGE_CMD"
+# echo ""
+# echo "======================================"
+# echo "Starting Vicon-PX4 Bridge..."
+# echo "======================================"
+# VICON_BRIDGE_CMD="ros2 launch vicon_px4_bridge vicon_px4_bridge.launch.py"
+# start_screen_session "vicon_bridge" "$VICON_BRIDGE_CMD"
 
 # ============================================================================
 # Startup Complete
