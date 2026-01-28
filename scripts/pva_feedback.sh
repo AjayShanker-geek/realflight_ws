@@ -113,7 +113,7 @@ tmux split-window -h -t "$SESSION_NAME" -c "$WS_DIR"
 readarray -t PANES < <(tmux list-panes -t "$SESSION_NAME" -F '#{pane_id}')
 LEFT_PANE="${PANES[0]}"
 RIGHT_PANE="${PANES[1]}"
-RECORD_PANE=$(tmux split-window -v -t "$RIGHT_PANE" -c "$WS_DIR" -P -F '#{pane_id}')
+# RECORD_PANE=$(tmux split-window -v -t "$RIGHT_PANE" -c "$WS_DIR" -P -F '#{pane_id}')
 
 # LEFT: PVA smooth realflight launch
 tmux send-keys -t "$LEFT_PANE" "cd $WS_DIR" C-m
@@ -126,15 +126,15 @@ tmux send-keys -t "$RIGHT_PANE" "sleep 5 && source /opt/ros/humble/setup.bash &&
 tmux send-keys -t "$RIGHT_PANE" "ros2 launch offboard_state_machine sync_goto.launch.py traj_base_dir:=${TRAJ_DIR_ESCAPED}" C-m
 
 # RECORD: rosbag
-BAG_DIR="$WS_DIR/rosbags"
-mkdir -p "$BAG_DIR"
-BAG_PATH="${BAG_DIR}/drone_${DRONE_ID}_$(date +%Y%m%d_%H%M%S)"
+# BAG_DIR="$WS_DIR/rosbags"
+# mkdir -p "$BAG_DIR"
+# BAG_PATH="${BAG_DIR}/drone_${DRONE_ID}_$(date +%Y%m%d_%H%M%S)"
 
-tmux send-keys -t "$RECORD_PANE" "cd $WS_DIR" C-m
-tmux send-keys -t "$RECORD_PANE" "source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
-tmux send-keys -t "$RECORD_PANE" "echo \"Recording ROS 2 bag for drone ${DRONE_ID}\"" C-m
-tmux send-keys -t "$RECORD_PANE" "echo \"Topics:\"; for t in ${BAG_TOPICS_STR}; do echo \"  - \$t\"; done" C-m
-tmux send-keys -t "$RECORD_PANE" "echo \"Output: ${BAG_PATH}\"" C-m
-tmux send-keys -t "$RECORD_PANE" "ros2 bag record -o ${BAG_PATH} ${BAG_TOPICS_STR}" C-m
+# tmux send-keys -t "$RECORD_PANE" "cd $WS_DIR" C-m
+# tmux send-keys -t "$RECORD_PANE" "source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
+# tmux send-keys -t "$RECORD_PANE" "echo \"Recording ROS 2 bag for drone ${DRONE_ID}\"" C-m
+# tmux send-keys -t "$RECORD_PANE" "echo \"Topics:\"; for t in ${BAG_TOPICS_STR}; do echo \"  - \$t\"; done" C-m
+# tmux send-keys -t "$RECORD_PANE" "echo \"Output: ${BAG_PATH}\"" C-m
+# tmux send-keys -t "$RECORD_PANE" "ros2 bag record -o ${BAG_PATH} ${BAG_TOPICS_STR}" C-m
 
 tmux attach-session -t "$SESSION_NAME"
