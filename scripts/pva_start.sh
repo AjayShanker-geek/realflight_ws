@@ -7,14 +7,92 @@ set -euo pipefail
 # and one state machine instance.
 
 DRONE_ID="${DRONE_ID:-0}"
+TOTAL_DRONES="${TOTAL_DRONES:-3}"
+DRONE_IDS_INPUT="${DRONE_IDS:-}"
 SESSION_NAME="pva_session_${DRONE_ID}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <trajectory_directory>"
+usage() {
+  cat <<EOF
+Usage: pva_start.sh [OPTIONS] <trajectory_directory>
+
+Options:
+  -n, --num-drones N    Total number of drones in the swarm (default: ${TOTAL_DRONES})
+  -i, --drone-ids IDS   Comma-separated list of drone IDs (default: 0..N-1)
+  -h, --help            Show this help and exit
+
+Environment:
+  DRONE_ID selects which vehicle this invocation controls (default: 0)
+EOF
+}
+
+TRAJ_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--num-drones)
+      TOTAL_DRONES="$2"; shift 2 ;;
+    -i|--drone-ids)
+      DRONE_IDS_INPUT="$2"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    --)
+      shift; break ;;
+    -*)
+      echo "Unknown option: $1" >&2; usage; exit 1 ;;
+    *)
+      TRAJ_ARG="$1"; shift; break ;;
+  esac
+done
+
+if [[ -z "$TRAJ_ARG" ]]; then
+  usage
   exit 1
 fi
+
+if [[ $# -gt 0 ]]; then
+  echo "Unexpected extra arguments: $*" >&2
+  usage
+  exit 1
+fi
+
+if ! [[ "$TOTAL_DRONES" =~ ^[0-9]+$ ]] || (( TOTAL_DRONES < 1 )); then
+  echo "Invalid --num-drones value: $TOTAL_DRONES (must be positive integer)" >&2
+  exit 1
+fi
+
+if [[ -z "$DRONE_IDS_INPUT" ]]; then
+  DRONE_IDS_INPUT="$(seq -s, 0 $((TOTAL_DRONES - 1)))"
+fi
+
+DRONE_IDS_INPUT="${DRONE_IDS_INPUT// /}"  # strip spaces
+IFS=',' read -r -a DRONE_IDS_ARR <<< "$DRONE_IDS_INPUT"
+
+if [[ ${#DRONE_IDS_ARR[@]} -ne TOTAL_DRONES ]]; then
+  echo "Mismatch: --drone-ids has ${#DRONE_IDS_ARR[@]} IDs but --num-drones is $TOTAL_DRONES" >&2
+  exit 1
+fi
+
+declare -A SEEN_IDS=()
+for id in "${DRONE_IDS_ARR[@]}"; do
+  if ! [[ "$id" =~ ^[0-9]+$ ]]; then
+    echo "Invalid drone id '$id' (must be non-negative integer)" >&2
+    exit 1
+  fi
+  if [[ -n "${SEEN_IDS[$id]:-}" ]]; then
+    echo "Duplicate drone id '$id'" >&2
+    exit 1
+  fi
+  SEEN_IDS[$id]=1
+done
+
+if [[ -z "${SEEN_IDS[$DRONE_ID]:-}" ]]; then
+  echo "DRONE_ID=$DRONE_ID is not listed in --drone-ids=$DRONE_IDS_INPUT" >&2
+  exit 1
+fi
+
+DRONE_IDS="$DRONE_IDS_INPUT"
+DRONE_IDS_ESCAPED="$(printf '%q' "$DRONE_IDS")"
 
 resolve_traj_dir() {
   local input="$1"
@@ -30,7 +108,7 @@ resolve_traj_dir() {
   exit 1
 }
 
-TRAJ_DIR="$(resolve_traj_dir "$1")"
+TRAJ_DIR="$(resolve_traj_dir "$TRAJ_ARG")"
 TRAJ_DIR_ESCAPED="$(printf '%q' "$TRAJ_DIR")"
 
 PARAMS_TEMPLATE="$WS_DIR/src/pva_control/config/pva_realflight_params.yaml"
@@ -79,8 +157,9 @@ start_tmux_with_recording() {
 
   # LEFT: PVA realflight + swarm coordinator (launch includes coordinator)
   tmux send-keys -t "$LEFT_PANE" "cd $WS_DIR" C-m
+  tmux send-keys -t "$LEFT_PANE" "export TOTAL_DRONES=${TOTAL_DRONES} DRONE_IDS=${DRONE_IDS_ESCAPED}" C-m
   tmux send-keys -t "$LEFT_PANE" "source /opt/ros/humble/setup.bash && source $WS_DIR/install/setup.bash" C-m
-  tmux send-keys -t "$LEFT_PANE" "ros2 launch pva_control pva_realflight_sync.launch.py params_file:=${PARAMS_FILE_ESCAPED}" C-m
+  tmux send-keys -t "$LEFT_PANE" "ros2 launch pva_control pva_realflight_sync.launch.py params_file:=${PARAMS_FILE_ESCAPED} total_drones:=${TOTAL_DRONES} drone_ids:=${DRONE_IDS_ESCAPED}" C-m
 
   # RIGHT: sync_goto (slight delay to let PVA come up) with same trajectory directory
   tmux send-keys -t "$RIGHT_PANE" "cd $WS_DIR" C-m

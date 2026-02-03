@@ -110,7 +110,9 @@ class DataLoaderVertical:
         patterns = []
         if num_drones is not None:
             patterns.append(f"{prefix}_*_a_{num_drones}.npy")
+            patterns.append(f"{prefix}_*_{num_drones}.npy")
         patterns.append(f"{prefix}_*_a_*.npy")
+        patterns.append(f"{prefix}_*.npy")
         for pattern in patterns:
             matches = sorted(self.path.glob(pattern))
             if matches:
