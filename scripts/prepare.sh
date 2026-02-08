@@ -39,11 +39,7 @@ echo "======================================"
 
 export TIMESYNC_IP="192.168.1.3"
 if command -v ntpdate >/dev/null 2>&1; then
-    if sudo -n true >/dev/null 2>&1; then
-        sudo -n ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
-    else
-        echo "Skipping time sync: sudo password is required for ntpdate."
-    fi
+    sudo ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
 fi
 
 # if [[ -n "$SSH_CONNECTION" ]]; then
