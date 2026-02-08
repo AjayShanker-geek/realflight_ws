@@ -33,16 +33,16 @@ public:
     hwm_ = this->declare_parameter<int>("hwm", 10);
     recv_max_per_poll_ = this->declare_parameter<int>("recv_max_per_poll", 50);
 
-    const char *env_id = std::getenv("DRONE_ID");
-    if (!env_id) {
-      throw std::runtime_error("DRONE_ID environment variable is not set");
-    }
-    drone_id_ = std::atoi(env_id);
-
     // Two roles: drone (ROS->ZMQ state, ZMQ->ROS command) or GCS (reverse).
     if (mode_ == "drone") {
+      const char *env_id = std::getenv("DRONE_ID");
+      if (!env_id) {
+        throw std::runtime_error("DRONE_ID environment variable is not set");
+      }
+      drone_id_ = std::atoi(env_id);
       setup_drone_mode();
     } else if (mode_ == "gcs") {
+      drone_id_ = -1;
       setup_gcs_mode();
     } else {
       throw std::runtime_error("Invalid mode parameter: " + mode_);
