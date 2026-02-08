@@ -23,8 +23,8 @@
 
 set -e  # Exit on any error
 DRONE_ID="${DRONE_ID:-0}"
-# Allow explicit override via environment; default to DRONE_ID for per-drone isolation.
-ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$DRONE_ID}"
+# Default to domain 0 to match PX4's default UXRCE_DDS_DOM_ID unless explicitly overridden.
+ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 FASTDDS_PROFILE_FILE="${FASTDDS_PROFILE_FILE:-$HOME/fastdds_lo_only.xml}"
 
 # ============================================================================
@@ -84,6 +84,9 @@ echo "MQ_IP: $MQ_IP"
 echo "DRONE_ID: $DRONE_ID"
 echo "ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
 echo "FASTDDS_PROFILE_FILE: $FASTDDS_PROFILE_FILE"
+if [ "$ROS_DOMAIN_ID" != "0" ]; then
+    echo "WARNING: ROS_DOMAIN_ID is not 0. Ensure PX4 UXRCE_DDS_DOM_ID matches this value."
+fi
 echo "======================================"
 echo ""
 
