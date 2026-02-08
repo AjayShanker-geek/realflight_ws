@@ -12,6 +12,7 @@
 #   - GCS_IP: Ground Control Station IP address for QGroundControl
 #   - DRONE_NAME_VICON: Vicon object name for the drone
 #   - VICON_IP: IP address of the Vicon motion capture server
+#   - MQ_IP: IP address of the ZeroMQ bridge server (GCS)
 #
 # Screen Sessions Created:
 #   1. px4_microdds: PX4 MicroXRCE-DDS Agent for serial communication
@@ -66,11 +67,18 @@ if [ -z "$VICON_IP" ]; then
     exit 1
 fi
 
+if [ -z "$MQ_IP" ]; then
+    echo "ERROR: MQ_IP environment variable is not set"
+    echo "Please set it with: export MQ_IP=<gcs_or_mq_ip>"
+    exit 1
+fi
+
 # Display current environment configuration
 echo "GCS_IP: $GCS_IP"
 echo "DRONE_NAME_VICON: $DRONE_NAME_VICON"
 echo "VICON_IP: $VICON_IP"
-echo "DRONE_ID: $DRONE_ID (only drone 0 launches vrpn_mocap)"
+echo "MQ_IP: $MQ_IP"
+echo "DRONE_ID: $DRONE_ID"
 echo "======================================"
 echo ""
 
@@ -80,7 +88,7 @@ echo ""
 # This command will be executed at the start of each screen session to
 # properly configure the ROS2 environment
 WORKSPACE_DIR="$HOME/realflight_ws"
-ROS2_SETUP_CMD="source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
+ROS2_SETUP_CMD="export ROS_LOCALHOST_ONLY=1; source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
 
 # ============================================================================
 # Function: Start Screen Session
@@ -141,16 +149,12 @@ start_screen_session "qgc_forward" "$QGC_FORWARD_CMD"
 # - Server: VICON_IP (Vicon Tracker server address)
 # - Port: 3883 (VRPN default port)
 # - Publishes: Transform data for tracked objects
-# echo ""
-# echo "======================================"
-# echo "Starting VRPN/Vicon Client..."
-# echo "======================================"
-# if [[ "$DRONE_ID" == "0" ]]; then
-#     VICON_CLIENT_CMD="ros2 launch vrpn_mocap client.launch.yaml server:=$VICON_IP port:=3883"
-#     start_screen_session "vicon_client" "$VICON_CLIENT_CMD"
-# else
-#     echo "Skipping VRPN/Vicon Client because DRONE_ID=$DRONE_ID (only drone 0 should publish mocap)."
-# fi
+echo ""
+echo "======================================"
+echo "Starting VRPN/Vicon Client..."
+echo "======================================"
+VICON_CLIENT_CMD="ros2 launch vrpn_mocap client.launch.yaml server:=$VICON_IP port:=3883"
+start_screen_session "vicon_client" "$VICON_CLIENT_CMD"
 
 # ============================================================================
 # Module 4: Vicon to PX4 Bridge
@@ -165,6 +169,20 @@ echo "Starting Vicon-PX4 Bridge..."
 echo "======================================"
 VICON_BRIDGE_CMD="ros2 launch vicon_px4_bridge vicon_px4_bridge.launch.py"
 start_screen_session "vicon_bridge" "$VICON_BRIDGE_CMD"
+
+# ============================================================================
+# Module 5: ZMQ ROS2 Bridge (state/command)
+# ============================================================================
+echo ""
+echo "======================================"
+echo "Starting ZMQ ROS2 Bridge..."
+echo "======================================"
+ZMQ_BRIDGE_CMD="ros2 run zmq_state_bridge zmq_state_bridge_node --ros-args \
+  --params-file $WORKSPACE_DIR/src/zmq_state_bridge/config/zmq_state_bridge_shared.yaml \
+  --params-file $WORKSPACE_DIR/src/zmq_state_bridge/config/zmq_state_bridge_drone.yaml \
+  -p state_push_endpoint:=tcp://$MQ_IP:5555 \
+  -p cmd_sub_endpoint:=tcp://$MQ_IP:5560"
+start_screen_session "zmq_bridge" "$ZMQ_BRIDGE_CMD"
 
 # ============================================================================
 # Startup Complete

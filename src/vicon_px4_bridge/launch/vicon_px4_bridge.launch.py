@@ -42,7 +42,7 @@ def generate_launch_description():
     vicon_px4_bridge_node = Node(
         package='vicon_px4_bridge',
         executable='vicon_px4_bridge_node',
-        name='vicon_px4_bridge',   
+        name=['vicon_px4_bridge_', drone_id],
         output='screen',
         parameters=[
             ParameterFile(config_file, allow_substs=True),

@@ -1,0 +1,9 @@
+zmq_state_bridge:
+  ros__parameters:
+    mode: "gcs"
+    drone_ids_csv: "0,1,2,3,4,5"
+    state_pull_bind: "tcp://*:5555"
+    cmd_pub_bind: "tcp://*:5560"
+    fanout_states: false
+    udp_state_fanout: true
+    udp_state_drone_ips_csv: "192.168.1.200,192.168.1.201,192.168.1.202,192.168.1.203,192.168.1.204,192.168.1.205"

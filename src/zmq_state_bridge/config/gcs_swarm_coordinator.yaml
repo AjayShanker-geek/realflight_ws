@@ -1,0 +1,11 @@
+gcs_swarm_coordinator:
+  ros__parameters:
+    drone_ids_csv: "0,1,2,3,4,5"
+    vicon_names_csv: ""
+    vicon_topic_prefix: "/vrpn_mocap/"
+    vicon_topic_suffix: "/pose"
+    takeoff_alt: 0.4
+    alt_tol: 0.05
+    hover_wait_time: 5.0
+    vicon_is_enu: true
+    use_vicon_altitude: true

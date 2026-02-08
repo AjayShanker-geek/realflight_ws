@@ -1,0 +1,6 @@
+zmq_state_bridge:
+  ros__parameters:
+    poll_period_ms: 10
+    hwm: 10
+    recv_max_per_poll: 200
+    udp_state_port: 5570

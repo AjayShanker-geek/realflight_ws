@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>zmq_state_bridge</name>
+  <version>0.0.1</version>
+  <description>ZeroMQ bridge for swarm state and command topics.</description>
+  <maintainer email="you@example.com">your name</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>pkg-config</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,7 @@
+zmq_state_bridge:
+  ros__parameters:
+    mode: "drone"
+    state_push_endpoint: "tcp://127.0.0.1:5555"
+    cmd_sub_endpoint: "tcp://127.0.0.1:5560"
+    udp_state_listen: true
+    udp_state_bind: "0.0.0.0"
