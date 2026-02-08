@@ -23,9 +23,11 @@
 
 set -e  # Exit on any error
 DRONE_ID="${DRONE_ID:-0}"
-# Default to domain 0 to match PX4's default UXRCE_DDS_DOM_ID unless explicitly overridden.
-ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 FASTDDS_PROFILE_FILE="${FASTDDS_PROFILE_FILE:-$HOME/fastdds_lo_only.xml}"
+# Keep localhost-only, but don't force ROS_DOMAIN_ID in this script.
+# If needed, set ROS_DOMAIN_ID externally to match PX4 UXRCE_DDS_DOM_ID.
+# QoS-from-XML can crash with this transport-only profile on Humble, keep it off by default.
+RMW_FASTRTPS_USE_QOS_FROM_XML="${RMW_FASTRTPS_USE_QOS_FROM_XML:-0}"
 
 # ============================================================================
 # Environment Variable Validation
@@ -37,7 +39,11 @@ echo "======================================"
 
 export TIMESYNC_IP="192.168.1.3"
 if command -v ntpdate >/dev/null 2>&1; then
-    sudo ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
+    if sudo -n true >/dev/null 2>&1; then
+        sudo -n ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
+    else
+        echo "Skipping time sync: sudo password is required for ntpdate."
+    fi
 fi
 
 # if [[ -n "$SSH_CONNECTION" ]]; then
@@ -82,11 +88,8 @@ echo "DRONE_NAME_VICON: $DRONE_NAME_VICON"
 echo "VICON_IP: $VICON_IP"
 echo "MQ_IP: $MQ_IP"
 echo "DRONE_ID: $DRONE_ID"
-echo "ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
 echo "FASTDDS_PROFILE_FILE: $FASTDDS_PROFILE_FILE"
-if [ "$ROS_DOMAIN_ID" != "0" ]; then
-    echo "WARNING: ROS_DOMAIN_ID is not 0. Ensure PX4 UXRCE_DDS_DOM_ID matches this value."
-fi
+echo "RMW_FASTRTPS_USE_QOS_FROM_XML: $RMW_FASTRTPS_USE_QOS_FROM_XML"
 echo "======================================"
 echo ""
 
@@ -97,19 +100,20 @@ echo ""
 # properly configure the ROS2 environment
 WORKSPACE_DIR="$HOME/realflight_ws"
 
-if [ ! -f "$FASTDDS_PROFILE_FILE" ]; then
-    echo "ERROR: Fast DDS profile file not found: $FASTDDS_PROFILE_FILE"
-    echo "Create it or set FASTDDS_PROFILE_FILE to the correct path."
-    exit 1
-fi
-
 ROS2_SETUP_CMD="export ROS_LOCALHOST_ONLY=1; \
-export ROS_DOMAIN_ID=$ROS_DOMAIN_ID; \
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp; \
-export FASTDDS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
-export FASTRTPS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
-export RMW_FASTRTPS_USE_QOS_FROM_XML=1; \
+export RMW_FASTRTPS_USE_QOS_FROM_XML=$RMW_FASTRTPS_USE_QOS_FROM_XML; \
 source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
+
+# Optionally use a Fast DDS profile when available.
+if [ -f "$FASTDDS_PROFILE_FILE" ]; then
+    ROS2_SETUP_CMD="export FASTDDS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
+export FASTRTPS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
+$ROS2_SETUP_CMD"
+else
+    echo "WARNING: Fast DDS profile file not found: $FASTDDS_PROFILE_FILE"
+    echo "Continuing without XML profile overrides."
+fi
 
 # ============================================================================
 # Function: Start Screen Session
@@ -204,6 +208,24 @@ ZMQ_BRIDGE_CMD="ros2 run zmq_state_bridge zmq_state_bridge_node --ros-args \
   -p state_push_endpoint:=tcp://$MQ_IP:5555 \
   -p cmd_sub_endpoint:=tcp://$MQ_IP:5560"
 start_screen_session "zmq_bridge" "$ZMQ_BRIDGE_CMD"
+
+# ============================================================================
+# PX4 Topic Visibility Check
+# ============================================================================
+echo ""
+echo "======================================"
+echo "Checking PX4 DDS topic visibility..."
+echo "======================================"
+PX4_TOPIC_COUNT=$(
+    bash -lc "$ROS2_SETUP_CMD && ros2 topic list --no-daemon --spin-time 8 2>/dev/null \
+        | grep -E '^/fmu/(in|out)/' | wc -l" || echo 0
+)
+PX4_TOPIC_COUNT=$(echo "$PX4_TOPIC_COUNT" | tr -d '[:space:]')
+echo "PX4 topic count (/fmu/in|/fmu/out): $PX4_TOPIC_COUNT"
+if [ -z "$PX4_TOPIC_COUNT" ] || [ "$PX4_TOPIC_COUNT" -lt 5 ]; then
+    echo "WARNING: PX4 topics are not visible under ROS_LOCALHOST_ONLY=1."
+    echo "Set PX4 parameter UXRCE_DDS_PTCFG=1 (localhost-only) and reboot PX4."
+fi
 
 # ============================================================================
 # Startup Complete
