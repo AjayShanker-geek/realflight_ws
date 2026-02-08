@@ -88,7 +88,11 @@ echo ""
 # This command will be executed at the start of each screen session to
 # properly configure the ROS2 environment
 WORKSPACE_DIR="$HOME/realflight_ws"
-ROS2_SETUP_CMD="export ROS_LOCALHOST_ONLY=1; source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
+ROS2_SETUP_CMD="export ROS_LOCALHOST_ONLY=1; \
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp; \
+export FASTDDS_DEFAULT_PROFILES_FILE=$HOME/fastdds_lo_only.xml; \
+export FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/fastdds_lo_only.xml; \
+source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
 
 # ============================================================================
 # Function: Start Screen Session
