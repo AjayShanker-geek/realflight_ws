@@ -5,8 +5,9 @@ set -euo pipefail
 # Coordinator runs on GCS; ROS is localhost-only per drone.
 
 DRONE_ID="${DRONE_ID:-0}"
-TOTAL_DRONES="${TOTAL_DRONES:-3}"
+TOTAL_DRONES="${TOTAL_DRONES:-6}"
 DRONE_IDS_INPUT="${DRONE_IDS:-}"
+TOTAL_DRONES_SET=false
 SESSION_NAME="pva_isolate_${DRONE_ID}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -17,7 +18,7 @@ Usage: pva_isolate.sh [OPTIONS] <trajectory_directory>
 
 Options:
   -n, --num-drones N    Total number of drones in the swarm (default: ${TOTAL_DRONES})
-  -i, --drone-ids IDS   Comma-separated list of drone IDs (default: 0..N-1)
+  -i, --drone-ids IDS   Drone IDs (comma-separated like 0,1,2 or compact like 012)
   -h, --help            Show this help and exit
 
 Environment:
@@ -29,7 +30,7 @@ TRAJ_ARG=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -n|--num-drones)
-      TOTAL_DRONES="$2"; shift 2 ;;
+      TOTAL_DRONES="$2"; TOTAL_DRONES_SET=true; shift 2 ;;
     -i|--drone-ids)
       DRONE_IDS_INPUT="$2"; shift 2 ;;
     -h|--help)
@@ -56,6 +57,45 @@ fi
 
 if ! [[ "$TOTAL_DRONES" =~ ^[0-9]+$ ]] || (( TOTAL_DRONES < 1 )); then
   echo "Invalid --num-drones value: $TOTAL_DRONES (must be positive integer)" >&2
+  exit 1
+fi
+
+normalize_drone_ids() {
+  local raw="$1"
+  raw="${raw// /}"
+  if [[ -z "$raw" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$raw" == *","* ]]; then
+    echo "$raw"
+    return
+  fi
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    # Single digit like "6" means total drones -> IDs 0..5 (unless total_drones==1).
+    if [[ ${#raw} -eq 1 ]] && { [[ "$TOTAL_DRONES_SET" == "false" ]] || [[ "$TOTAL_DRONES" -eq "$raw" ]]; }; then
+      TOTAL_DRONES="$raw"
+      echo "$(seq -s, 0 $((TOTAL_DRONES - 1)))"
+      return
+    fi
+    # Compact list like "012345" -> 0,1,2,3,4,5
+    if [[ "$raw" =~ ^0[0-9]+$ ]]; then
+      local ids=""
+      local i
+      for ((i=0; i<${#raw}; i++)); do
+        ids+="${raw:i:1},"
+      done
+      echo "${ids%,}"
+      return
+    fi
+  fi
+  echo "$raw"
+}
+
+DRONE_IDS_INPUT="$(normalize_drone_ids "$DRONE_IDS_INPUT")"
+
+if ! [[ "$TOTAL_DRONES" =~ ^[0-9]+$ ]] || (( TOTAL_DRONES < 1 )); then
+  echo "Invalid --num-drones value after normalization: $TOTAL_DRONES (must be positive integer)" >&2
   exit 1
 fi
 
@@ -88,6 +128,9 @@ if [[ -z "${SEEN_IDS[$DRONE_ID]:-}" ]]; then
   echo "DRONE_ID=$DRONE_ID is not listed in --drone-ids=$DRONE_IDS_INPUT" >&2
   exit 1
 fi
+
+DRONE_IDS_COMPACT="${DRONE_IDS_INPUT//,/}"
+echo "Drone IDs: ${DRONE_IDS_INPUT} (compact: ${DRONE_IDS_COMPACT})"
 
 resolve_traj_dir() {
   local input="$1"
