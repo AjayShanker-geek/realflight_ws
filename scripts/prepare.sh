@@ -37,7 +37,7 @@ echo "======================================"
 echo "sync with remote time server if ssh connected..."
 echo "======================================"
 
-export TIMESYNC_IP="192.168.1.3"
+export TIMESYNC_IP="192.168.1.123"
 if command -v ntpdate >/dev/null 2>&1; then
     sudo ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
 fi
