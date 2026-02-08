@@ -23,6 +23,9 @@
 
 set -e  # Exit on any error
 DRONE_ID="${DRONE_ID:-0}"
+# Allow explicit override via environment; default to DRONE_ID for per-drone isolation.
+ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-$DRONE_ID}"
+FASTDDS_PROFILE_FILE="${FASTDDS_PROFILE_FILE:-$HOME/fastdds_lo_only.xml}"
 
 # ============================================================================
 # Environment Variable Validation
@@ -79,6 +82,8 @@ echo "DRONE_NAME_VICON: $DRONE_NAME_VICON"
 echo "VICON_IP: $VICON_IP"
 echo "MQ_IP: $MQ_IP"
 echo "DRONE_ID: $DRONE_ID"
+echo "ROS_DOMAIN_ID: $ROS_DOMAIN_ID"
+echo "FASTDDS_PROFILE_FILE: $FASTDDS_PROFILE_FILE"
 echo "======================================"
 echo ""
 
@@ -88,10 +93,19 @@ echo ""
 # This command will be executed at the start of each screen session to
 # properly configure the ROS2 environment
 WORKSPACE_DIR="$HOME/realflight_ws"
+
+if [ ! -f "$FASTDDS_PROFILE_FILE" ]; then
+    echo "ERROR: Fast DDS profile file not found: $FASTDDS_PROFILE_FILE"
+    echo "Create it or set FASTDDS_PROFILE_FILE to the correct path."
+    exit 1
+fi
+
 ROS2_SETUP_CMD="export ROS_LOCALHOST_ONLY=1; \
+export ROS_DOMAIN_ID=$ROS_DOMAIN_ID; \
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp; \
-export FASTDDS_DEFAULT_PROFILES_FILE=$HOME/fastdds_lo_only.xml; \
-export FASTRTPS_DEFAULT_PROFILES_FILE=$HOME/fastdds_lo_only.xml; \
+export FASTDDS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
+export FASTRTPS_DEFAULT_PROFILES_FILE=$FASTDDS_PROFILE_FILE; \
+export RMW_FASTRTPS_USE_QOS_FROM_XML=1; \
 source /opt/ros/humble/setup.bash && source $WORKSPACE_DIR/install/setup.bash"
 
 # ============================================================================
