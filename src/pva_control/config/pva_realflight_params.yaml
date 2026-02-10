@@ -10,7 +10,7 @@
     timer_period: 0.01
     payload_pose_topic: "/vrpn_mocap/multilift_payload/pose"
     payload_mass: 0.220
-    payload_added_mass: 0.20
+    payload_added_mass: 0.30
     payload_rp: [0.05, 0.0, 0.0]
     payload_radius: 0.245
     feedforward_weight: 0.0
