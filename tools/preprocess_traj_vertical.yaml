@@ -1,5 +1,5 @@
 # base_dir: "raw_data/Planning_plots_multiagent_meta_evaluation_COM_Dyn_V_6"
-base_dir: "raw_data/Planning_plots_stage2_COM_Dyn_V_6_y_5cm"
+base_dir: "raw_data/Planning_plots_stage2_COM_Dyn_6_rpy5"
 num_drones: 6
 cl0: 1.0
 payload_radius: 0.245
