@@ -13,7 +13,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     default_drone_id = os.environ.get("DRONE_ID", "0")
-    default_total = os.environ.get("TOTAL_DRONES", "3")
+    default_total = os.environ.get("TOTAL_DRONES", "6")
     default_params = PathJoinSubstitution([
         FindPackageShare("pva_control"),
         "config",
