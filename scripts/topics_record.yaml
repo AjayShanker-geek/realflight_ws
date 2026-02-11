@@ -1,0 +1,9 @@
+topics:
+  - /vrpn_mocap/multilift_0/pose
+  - /vrpn_mocap/multilift_1/pose
+  - /vrpn_mocap/multilift_2/pose
+  - /vrpn_mocap/multilift_3/pose
+  - /vrpn_mocap/multilift_4/pose
+  - /vrpn_mocap/multilift_5/pose
+  - /vrpn_mocap/multilift_payload/pose
+
