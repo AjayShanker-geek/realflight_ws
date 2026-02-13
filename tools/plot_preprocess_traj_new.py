@@ -501,6 +501,102 @@ def plot_paths_3d(payload_path: Path, drone_paths: list[tuple[int, Path]]):
     fig._paths_update = update_time
 
 
+def plot_min_drone_distances(drone_paths: list[tuple[int, Path]]):
+    if len(drone_paths) < 2:
+        return
+
+    drone_data = {}
+    for drone_id, path in drone_paths:
+        df = pd.read_csv(path)
+        if "time" not in df.columns:
+            continue
+        time = df["time"].to_numpy()
+        pos = df[["x", "y", "z"]].to_numpy()
+        order = np.argsort(time)
+        drone_data[drone_id] = {
+            "time": time[order],
+            "pos": pos[order],
+        }
+
+    if len(drone_data) < 2:
+        return
+
+    drone_ids = sorted(drone_data.keys())
+    base_time = drone_data[drone_ids[0]]["time"]
+    t_min = max(drone_data[drone_id]["time"][0] for drone_id in drone_ids)
+    t_max = min(drone_data[drone_id]["time"][-1] for drone_id in drone_ids)
+    mask = (base_time >= t_min) & (base_time <= t_max)
+    time = base_time[mask]
+    if time.size < 2:
+        return
+
+    positions = {}
+    for drone_id in drone_ids:
+        t = drone_data[drone_id]["time"]
+        p = drone_data[drone_id]["pos"]
+        x = np.interp(time, t, p[:, 0])
+        y = np.interp(time, t, p[:, 1])
+        z = np.interp(time, t, p[:, 2])
+        positions[drone_id] = np.stack([x, y, z], axis=1)
+
+    pairs = []
+    distances = []
+    for i, drone_a in enumerate(drone_ids):
+        for drone_b in drone_ids[i + 1 :]:
+            pairs.append((drone_a, drone_b))
+            d = np.linalg.norm(positions[drone_a] - positions[drone_b], axis=1)
+            distances.append(d)
+
+    if not distances:
+        return
+
+    dist_stack = np.vstack(distances)
+    min_idx = np.argmin(dist_stack, axis=0)
+    min_dist = dist_stack[min_idx, np.arange(dist_stack.shape[1])]
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
+    colors = plt.cm.tab20(np.linspace(0, 1, len(pairs)))
+    for pair_idx, ((drone_a, drone_b), color) in enumerate(zip(pairs, colors)):
+        label = f"drones {drone_a}-{drone_b}"
+        ax.plot(
+            time,
+            distances[pair_idx],
+            label=label,
+            color=color,
+            linewidth=1,
+            alpha=0.35,
+        )
+        seg = np.where(min_idx == pair_idx, min_dist, np.nan)
+        ax.plot(time, seg, color=color, linewidth=2.2)
+
+    change_points = np.flatnonzero(np.diff(min_idx) != 0) + 1
+    segment_starts = np.r_[0, change_points]
+    segment_ends = np.r_[change_points, len(min_idx)]
+    for start, end in zip(segment_starts, segment_ends):
+        if end <= start:
+            continue
+        pair_idx = int(min_idx[start])
+        mid = (start + end - 1) // 2
+        drone_a, drone_b = pairs[pair_idx]
+        label = f"{drone_a}-{drone_b}"
+        ax.text(
+            time[mid],
+            min_dist[mid],
+            label,
+            fontsize="medium",
+            ha="center",
+            va="bottom",
+            color="black",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7, edgecolor="none"),
+        )
+
+    ax.set_title("Minimum inter-drone distance (closest pair)")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("distance [m]")
+    ax.grid(True)
+    ax.legend(ncol=2, fontsize="small")
+
+
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
@@ -554,6 +650,9 @@ def main() -> None:
 
     if payload_path.exists() and drone_paths and not args.no_3d:
         plot_paths_3d(payload_path, drone_paths)
+
+    if len(drone_paths) >= 2:
+        plot_min_drone_distances(drone_paths)
 
     print("Displaying plots. Press Ctrl+C to exit or close all plot windows.")
     plt.tight_layout()
