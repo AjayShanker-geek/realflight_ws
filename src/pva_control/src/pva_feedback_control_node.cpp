@@ -286,8 +286,10 @@ PvaFeedbackControlNode::PvaFeedbackControlNode(int drone_id, int total_drones)
   payload_is_enu_ = this->declare_parameter("payload_is_enu", true);
   yaw_setpoint_ = this->declare_parameter("yaw_setpoint", 3.1415926);
   drone_mass_ = this->declare_parameter("drone_mass", 0.25);
-  payload_mass_ = this->declare_parameter("payload_mass", 0.15);
-  payload_added_mass_ = this->declare_parameter("payload_added_mass", 0.1);
+  const double payload_mass_legacy = this->declare_parameter("payload_mass", 0.15);
+  const double payload_added_mass_legacy = this->declare_parameter("payload_added_mass", 0.1);
+  payload_mass_ = this->declare_parameter("m1", payload_mass_legacy);
+  payload_added_mass_ = this->declare_parameter("m2", payload_added_mass_legacy);
   payload_radius_ = this->declare_parameter("payload_radius", 0.13);
   alpha_gain_ = this->declare_parameter("alpha_gain", 0.10);
   feedforward_weight_ = this->declare_parameter("feedforward_weight", 1.0);
@@ -356,6 +358,7 @@ PvaFeedbackControlNode::PvaFeedbackControlNode(int drone_id, int total_drones)
 
   std::vector<double> rp_param = this->declare_parameter(
     "payload_rp", std::vector<double>{0.0, 0.0, 0.0});
+  rp_param = this->declare_parameter("rp", rp_param);
   if (rp_param.size() == 3) {
     payload_rp_ = Eigen::Vector3d(rp_param[0], rp_param[1], rp_param[2]);
   } else if (rp_param.size() == 2) {
@@ -363,7 +366,7 @@ PvaFeedbackControlNode::PvaFeedbackControlNode(int drone_id, int total_drones)
   } else {
     payload_rp_.setZero();
     RCLCPP_WARN(this->get_logger(),
-                "payload_rp must have 2 or 3 elements; using zeros");
+                "rp (or payload_rp) must have 2 or 3 elements; using zeros");
   }
 
   std::filesystem::path base_dir = data_root.empty()

@@ -52,18 +52,6 @@ def _parse_float(config: dict, key: str) -> Optional[float]:
         return None
 
 
-def _parse_bool(config: dict, key: str, default: bool = False) -> bool:
-    value = config.get(key)
-    if value is None:
-        return default
-    val = str(value).strip().lower()
-    if val in ("1", "true", "yes", "y", "on"):
-        return True
-    if val in ("0", "false", "no", "n", "off"):
-        return False
-    return default
-
-
 def _parse_int(config: dict, key: str) -> Optional[int]:
     value = config.get(key)
     if value is None:
@@ -72,6 +60,22 @@ def _parse_int(config: dict, key: str) -> Optional[int]:
         return int(str(value).strip())
     except ValueError:
         return None
+
+
+def _parse_vec3_literal(value: str) -> Optional[np.ndarray]:
+    nums = [float(v) for v in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", value)]
+    if len(nums) < 2:
+        return None
+    if len(nums) == 2:
+        nums.append(0.0)
+    return np.array(nums[:3], dtype=float)
+
+
+def _parse_vec3(config: dict, key: str) -> Optional[np.ndarray]:
+    value = config.get(key)
+    if value is None:
+        return None
+    return _parse_vec3_literal(str(value))
 
 
 class DataLoaderVertical:
@@ -136,6 +140,7 @@ class DataLoaderVertical:
         self.g = 9.81
         self.ez = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
         self.payload_attitude_identity = False
+        self.rg = np.zeros(3, dtype=float)
 
         config = read_config(CONFIG_PATH)
         self.num_drones_config = _parse_int(config, "num_drones")
@@ -148,11 +153,23 @@ class DataLoaderVertical:
             self.cable_length = cl0_val
         payload_radius_val = _parse_float(config, "payload_radius")
         rl_val = _parse_float(config, "rl")
-        self.payload_attitude_identity = _parse_bool(config, "payload_attitude_identity", False)
         if payload_radius_val is not None:
             self.rl = payload_radius_val
         elif rl_val is not None:
             self.rl = rl_val
+
+        m1 = _parse_float(config, "m1")
+        m2 = _parse_float(config, "m2")
+        rp = _parse_vec3(config, "rp")
+        if m1 is None or m2 is None or rp is None:
+            raise ValueError(
+                "Missing CoM parameters in preprocess_traj_vertical.yaml. "
+                "Please set m1, m2, and rp: [x, y, z]."
+            )
+        total_mass = m1 + m2
+        if total_mass <= 1e-9:
+            raise ValueError(f"Invalid masses: m1 + m2 must be > 0 (got m1={m1}, m2={m2})")
+        self.rg = (m2 / total_mass) * rp
 
         xq_file = self._find_traj_file("xq_traj", self.num_drones_config, config.get("traj_suffix"))
         self.traj_suffix = self._extract_suffix(xq_file, "xq_traj")
@@ -204,6 +221,7 @@ class TrajectoryConverterVertical:
         self.alpha = self.loader.alpha
         self.g = self.loader.g
         self.ez = self.loader.ez.reshape(3)
+        self.rg = self.loader.rg.reshape(3)
         self.T_enu2ned = np.array(
             [
                 [0.0, 1.0, 0.0],
@@ -211,6 +229,16 @@ class TrajectoryConverterVertical:
                 [0.0, 0.0, -1.0],
             ]
         )
+
+    def attachment_points_body(self) -> np.ndarray:
+        attach = np.array(
+            [
+                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
+                for i in range(self.num_drones)
+            ],
+            dtype=float,
+        )
+        return attach - self.rg[None, :]
 
     def enu_to_ned(self, data: np.ndarray) -> np.ndarray:
         flat = data.reshape(-1, 3)
@@ -220,12 +248,7 @@ class TrajectoryConverterVertical:
     def compute_positions(self) -> np.ndarray:
         N = self.loader.payload_x.shape[0]
         pos_enu = np.zeros((self.num_drones, N, 3))
-        ri = np.array(
-            [
-                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
-                for i in range(self.num_drones)
-            ]
-        )
+        ri = self.attachment_points_body()
         payload_enu = self.loader.payload_x
         cable_dir_enu = self.loader.cable_direction
         for i in range(self.num_drones):
@@ -244,12 +267,7 @@ class TrajectoryConverterVertical:
         cable_omega: np.ndarray,
         cable_omega_dot: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        r_attach_body = np.array(
-            [
-                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
-                for i in range(self.num_drones)
-            ]
-        )
+        r_attach_body = self.attachment_points_body()
         rot = self.quat_to_rotmat(payload_q)
         r_attach_world = np.einsum("tij,dj->tdi", rot, r_attach_body)
         r_attach_world = np.transpose(r_attach_world, (1, 0, 2))

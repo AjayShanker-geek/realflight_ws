@@ -17,22 +17,9 @@ from typing import Optional
 import numpy as np
 
 FILE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = FILE_DIR / "preprocess_traj_new.yaml"
 sys.path.append(str(FILE_DIR))
 
-from get_data_new import DataLoader, resolve_scenario_dir, _read_config
-
-
-def _parse_bool(config: dict, key: str, default: bool = False) -> bool:
-    value = config.get(key)
-    if value is None:
-        return default
-    val = str(value).strip().lower()
-    if val in ("1", "true", "yes", "y", "on"):
-        return True
-    if val in ("0", "false", "no", "n", "off"):
-        return False
-    return default
+from get_data_new import DataLoader, resolve_scenario_dir
 
 
 class TrajectoryConverterNew:
@@ -55,11 +42,11 @@ class TrajectoryConverterNew:
         self.order = order
         self._fact = [math.factorial(i) for i in range(self.order + 1)]
         self._c5_inv = self._build_c5_inv()
-        config = _read_config(CONFIG_PATH)
-        self.payload_attitude_identity = _parse_bool(config, "payload_attitude_identity", False)
+        self.payload_attitude_identity = False
         self.rl = self.loader.rl
         self.cable_length = self.loader.cable_length
         self.alpha = self.loader.alpha
+        self.rg = np.array(self.loader.rg, dtype=float).reshape(3)
         self.g = self.loader.g
         self.ez = self.loader.ez.reshape(3)
         self.T_enu2ned = np.array(
@@ -70,6 +57,16 @@ class TrajectoryConverterNew:
             ]
         )
 
+    def attachment_points_body(self) -> np.ndarray:
+        attach = np.array(
+            [
+                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
+                for i in range(self.num_drones)
+            ],
+            dtype=float,
+        )
+        return attach - self.rg[None, :]
+
     def enu_to_ned(self, data: np.ndarray) -> np.ndarray:
         flat = data.reshape(-1, 3)
         transformed = (self.T_enu2ned @ flat.T).T
@@ -78,12 +75,7 @@ class TrajectoryConverterNew:
     def compute_positions(self) -> np.ndarray:
         N = self.loader.payload_x.shape[0]
         pos_enu = np.zeros((self.num_drones, N, 3))
-        ri = np.array(
-            [
-                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
-                for i in range(self.num_drones)
-            ]
-        )
+        ri = self.attachment_points_body()
         payload_enu = self.loader.payload_x
         cable_dir_enu = self.loader.cable_direction
         for i in range(self.num_drones):
@@ -102,12 +94,7 @@ class TrajectoryConverterNew:
         cable_omega: np.ndarray,
         cable_omega_dot: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        r_attach_body = np.array(
-            [
-                [self.rl * np.cos(i * self.alpha), self.rl * np.sin(i * self.alpha), 0.0]
-                for i in range(self.num_drones)
-            ]
-        )
+        r_attach_body = self.attachment_points_body()
         rot = self.quat_to_rotmat(payload_q)
         r_attach_world = np.einsum("tij,dj->tdi", rot, r_attach_body)
         r_attach_world = np.transpose(r_attach_world, (1, 0, 2))

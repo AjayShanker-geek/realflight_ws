@@ -40,23 +40,23 @@ def _parse_float(config: dict, key: str) -> Optional[float]:
         return None
 
 
-def _parse_rg(config: dict) -> Optional[np.ndarray]:
-    value = config.get("rg")
+def _parse_vec3(config: dict, key: str) -> Optional[np.ndarray]:
+    value = config.get(key)
     if value is None:
         return None
-    match = re.match(r"^\[([^\]]+)\]$", value)
+    match = re.match(r"^\[([^\]]+)\]$", str(value).strip())
     if not match:
         return None
     parts = [p.strip() for p in match.group(1).split(",")]
     if len(parts) < 2:
         return None
     try:
-        rg_x = float(parts[0])
-        rg_y = float(parts[1])
-        rg_z = float(parts[2]) if len(parts) > 2 else 0.0
+        x = float(parts[0])
+        y = float(parts[1])
+        z = float(parts[2]) if len(parts) > 2 else 0.0
     except ValueError:
         return None
-    return np.array([rg_x, rg_y, rg_z])
+    return np.array([x, y, z])
 
 
 def resolve_default_scenario_dir(base_dir: Path) -> Path:
@@ -131,12 +131,18 @@ class DataLoader:
         cl_val = _parse_float(config, "cl0")
         if cl_val is not None:
             self.cable_length = cl_val
-        ml_val = _parse_float(config, "ml")
-        if ml_val is not None:
-            self.ml = ml_val
-        rg_val = _parse_rg(config)
-        if rg_val is not None:
-            self.rg = rg_val
+        m1 = _parse_float(config, "m1")
+        m2 = _parse_float(config, "m2")
+        rp = _parse_vec3(config, "rp")
+        if m1 is None or m2 is None or rp is None:
+            raise ValueError(
+                "Missing CoM parameters in preprocess_traj_new.yaml. "
+                "Please set m1, m2, and rp: [x, y, z]."
+            )
+        self.ml = m1 + m2
+        if self.ml <= 1e-9:
+            raise ValueError(f"Invalid masses: m1 + m2 must be > 0 (got m1={m1}, m2={m2})")
+        self.rg = (m2 / self.ml) * rp
 
         # Reference trajectory coefficients (S-shape, 4 segments)
         self.Coeffx = np.zeros((4, 8))

@@ -11,9 +11,9 @@
     kfb_csv: ""
     timer_period: 0.01
     payload_odom_topic: "/payload_odom"
-    payload_mass: 0.150
-    payload_added_mass: 0.10
-    payload_rp: [0.0, 0.07, 0.0]
+    m1: 0.150
+    m2: 0.10
+    rp: [0.0, 0.07, 0.0]
     payload_radius: 0.125
     cable_length: 1.0
     feedforward_weight: 1.0
