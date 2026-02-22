@@ -42,11 +42,11 @@ class TrajectoryConverterNew:
         self.order = order
         self._fact = [math.factorial(i) for i in range(self.order + 1)]
         self._c5_inv = self._build_c5_inv()
-        self.payload_attitude_identity = False
+        self.payload_attitude_identity = self.loader.payload_attitude_identity
         self.rl = self.loader.rl
         self.cable_length = self.loader.cable_length
         self.alpha = self.loader.alpha
-        self.rg = np.array(self.loader.rg, dtype=float).reshape(3)
+        self.rg = self.loader.rg.reshape(3)
         self.g = self.loader.g
         self.ez = self.loader.ez.reshape(3)
         self.T_enu2ned = np.array(
@@ -312,158 +312,6 @@ class TrajectoryConverterNew:
             acc_out[:, idx_start:idx_end, :] = np.transpose(acc_seg, (0, 2, 1))
             jerk_out[:, idx_start:idx_end, :] = np.transpose(jerk_seg, (0, 2, 1))
             snap_out[:, idx_start:idx_end, :] = np.transpose(snap_seg, (0, 2, 1))
-
-        return pos_out, vel_out, acc_out, jerk_out, snap_out
-
-    def _derivative_row(self, u: float, order: int, deriv_order: int, scale: float) -> np.ndarray:
-        row = np.zeros(order + 1, dtype=float)
-        inv_scale = scale ** (-deriv_order)
-        for m in range(deriv_order, order + 1):
-            row[m] = (
-                self._fact[m] / self._fact[m - deriv_order]
-            ) * (u ** (m - deriv_order)) * inv_scale
-        return row
-
-    @staticmethod
-    def _solve_constrained_ls(
-        A: np.ndarray, y: np.ndarray, B: np.ndarray, d: np.ndarray
-    ) -> Optional[np.ndarray]:
-        if B.size == 0:
-            coeff, *_ = np.linalg.lstsq(A, y, rcond=None)
-            return coeff
-        try:
-            c0, *_ = np.linalg.lstsq(B, d, rcond=None)
-        except np.linalg.LinAlgError:
-            return None
-        residual = np.linalg.norm(B @ c0 - d)
-        if not np.isfinite(residual) or residual > 1e-6:
-            return None
-        try:
-            _, s, vt = np.linalg.svd(B, full_matrices=True)
-        except np.linalg.LinAlgError:
-            return None
-        tol = max(B.shape) * np.max(s) * 1e-12 if s.size else 0.0
-        rank = int(np.sum(s > tol))
-        z_basis = vt[rank:].T
-        if z_basis.size == 0:
-            return c0
-        az = A @ z_basis
-        rhs = y - A @ c0
-        try:
-            z, *_ = np.linalg.lstsq(az, rhs, rcond=None)
-        except np.linalg.LinAlgError:
-            return None
-        return c0 + z_basis @ z
-
-    @staticmethod
-    def _coeff_ok(coeff: np.ndarray, max_win: float) -> bool:
-        if coeff is None:
-            return False
-        if not np.all(np.isfinite(coeff)):
-            return False
-        if np.max(np.abs(coeff)) > 1e6:
-            return False
-        if abs(coeff[0]) > 10.0 * max_win:
-            return False
-        return True
-
-    def resample_polynomial_receding_c5(
-        self,
-        series_raw: np.ndarray,
-        time_raw: np.ndarray,
-        time_dense: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if self.order < 5:
-            raise ValueError("order must be >= 5 for C5 continuity")
-
-        num_tracks, _, _ = series_raw.shape
-        pos_out = np.zeros((num_tracks, len(time_dense), 3))
-        vel_out = np.zeros_like(pos_out)
-        acc_out = np.zeros_like(pos_out)
-        jerk_out = np.zeros_like(pos_out)
-        snap_out = np.zeros_like(pos_out)
-
-        half_w = self.window // 2
-        for i in range(num_tracks):
-            for axis in range(3):
-                values = series_raw[i, :, axis]
-                prev_coeff: Optional[np.ndarray] = None
-                prev_order = 0
-                prev_scale = 1.0
-                for idx_t, t in enumerate(time_dense):
-                    close_mask = np.isclose(time_raw, t)
-                    raw_idx = int(np.argmax(close_mask)) if np.any(close_mask) else np.searchsorted(time_raw, t)
-                    is_raw = raw_idx < len(time_raw) and np.isclose(time_raw[raw_idx], t)
-
-                    center = raw_idx
-                    start = max(0, center - half_w)
-                    end = min(len(time_raw), start + self.window)
-                    start = max(0, end - self.window)
-                    t_win = time_raw[start:end]
-                    v_win = values[start:end]
-
-                    order_fit = min(self.order, len(t_win) - 1)
-                    if order_fit < 1:
-                        pos_out[i, idx_t, axis] = values[center if center < len(values) else -1]
-                        prev_coeff = None
-                        prev_order = 0
-                        continue
-
-                    tau = t_win - t
-                    scale = float(np.max(np.abs(tau)))
-                    if not np.isfinite(scale) or scale < 1e-9:
-                        scale = 1.0
-                    u = tau / scale
-                    A = np.vander(u, N=order_fit + 1, increasing=True)
-                    max_win = float(np.max(np.abs(v_win))) if v_win.size else 1.0
-                    if not np.isfinite(max_win) or max_win < 1.0:
-                        max_win = 1.0
-
-                    coeff = None
-                    cont_order = 0
-                    if prev_coeff is not None and np.all(np.isfinite(prev_coeff)) and idx_t > 0:
-                        cont_order = min(5, order_fit, prev_order)
-                    for c_order in range(cont_order, -2, -1):
-                        constraints = []
-                        rhs = []
-                        if prev_coeff is not None and c_order >= 0 and idx_t > 0:
-                            dt_dense = time_dense[idx_t] - time_dense[idx_t - 1]
-                            u_prev = (-dt_dense) / scale
-                            for k in range(c_order + 1):
-                                row = self._derivative_row(u_prev, order_fit, k, scale)
-                                d_prev = self._fact[k] * prev_coeff[k] / (prev_scale ** k)
-                                constraints.append(row)
-                                rhs.append(d_prev)
-                        if is_raw:
-                            row = np.zeros(order_fit + 1, dtype=float)
-                            row[0] = 1.0
-                            constraints.append(row)
-                            rhs.append(values[raw_idx])
-
-                        if constraints:
-                            B = np.vstack(constraints)
-                            d = np.array(rhs, dtype=float)
-                            coeff = self._solve_constrained_ls(A, v_win, B, d)
-                        else:
-                            coeff = np.linalg.lstsq(A, v_win, rcond=None)[0]
-                        if self._coeff_ok(coeff, max_win):
-                            break
-                        coeff = None
-
-                    if coeff is None:
-                        coeff = np.linalg.lstsq(A, v_win, rcond=None)[0]
-                        if is_raw:
-                            coeff[0] = values[raw_idx]
-
-                    pos_out[i, idx_t, axis] = coeff[0]
-                    vel_out[i, idx_t, axis] = (coeff[1] / scale) if order_fit >= 1 else 0.0
-                    acc_out[i, idx_t, axis] = (2.0 * coeff[2] / (scale ** 2)) if order_fit >= 2 else 0.0
-                    jerk_out[i, idx_t, axis] = (6.0 * coeff[3] / (scale ** 3)) if order_fit >= 3 else 0.0
-                    snap_out[i, idx_t, axis] = (24.0 * coeff[4] / (scale ** 4)) if order_fit >= 4 else 0.0
-
-                    prev_coeff = coeff
-                    prev_order = order_fit
-                    prev_scale = scale
 
         return pos_out, vel_out, acc_out, jerk_out, snap_out
 
@@ -1093,7 +941,7 @@ class TrajectoryConverterNew:
         )
 
         # Kfb gains (upsampled to match time_dense)
-        kfb_path = self.loader.path / "Kfb_traj_0_3_a_3.npy"
+        kfb_path = self.loader.kfb_path
         if not kfb_path.exists():
             print(f"ERROR: Kfb file not found: {kfb_path}", file=sys.stderr)
             raise FileNotFoundError(f"Kfb file not found: {kfb_path}")

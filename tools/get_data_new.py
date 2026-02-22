@@ -1,20 +1,23 @@
-# Reader for the updated offline trajectory (20 Hz, 6 s, 3-quad S-shape case)
-# Class name kept as DataLoader for drop-in use. Missing legacy params are zeroed.
+#!/usr/bin/env python3
+"""
+Data loader for COM_Dyn_H preprocessing.
+
+This keeps the same public interface used by preprocess scripts while mirroring
+file/config handling from preprocess_traj_vertical.py.
+"""
 
 import math
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from casadi import SX, Function, jacobian, mtimes, vertcat, horzcat
 
-# Repository root
 BASE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = BASE_DIR / "tools" / "preprocess_traj_new.yaml"
+CONFIG_PATH = BASE_DIR / "tools" / "preprocess_traj_new.yaml"
 
 
-def _read_config(config_path: Path) -> dict:
+def read_config(config_path: Path) -> dict:
     if not config_path.exists():
         return {}
     config = {}
@@ -40,36 +43,46 @@ def _parse_float(config: dict, key: str) -> Optional[float]:
         return None
 
 
+def _parse_int(config: dict, key: str) -> Optional[int]:
+    value = config.get(key)
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def _parse_vec3_literal(value: str) -> Optional[np.ndarray]:
+    nums = [float(v) for v in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", value)]
+    if len(nums) < 2:
+        return None
+    if len(nums) == 2:
+        nums.append(0.0)
+    return np.array(nums[:3], dtype=float)
+
+
 def _parse_vec3(config: dict, key: str) -> Optional[np.ndarray]:
     value = config.get(key)
     if value is None:
         return None
-    match = re.match(r"^\[([^\]]+)\]$", str(value).strip())
-    if not match:
-        return None
-    parts = [p.strip() for p in match.group(1).split(",")]
-    if len(parts) < 2:
-        return None
-    try:
-        x = float(parts[0])
-        y = float(parts[1])
-        z = float(parts[2]) if len(parts) > 2 else 0.0
-    except ValueError:
-        return None
-    return np.array([x, y, z])
+    return _parse_vec3_literal(str(value))
 
 
-def resolve_default_scenario_dir(base_dir: Path) -> Path:
-    raw_root = base_dir / "raw_data"
-    candidates = sorted(raw_root.glob("Planning_plots_multiagent_meta_evaluation_COM_Dyn_H*"))
-    if not candidates:
-        raise FileNotFoundError(
-            f"No COM_Dyn_H scenario directories found under {raw_root}"
-        )
-    for cand in candidates:
-        if "rg=[0,-0.03]" in cand.name:
-            return cand
-    return candidates[0]
+def resolve_default_scenario_dir(repo_root: Path) -> Path:
+    raw_root = repo_root / "raw_data"
+    patterns = [
+        "Planning_plots_stage2_COM_Dyn_H*",
+        "Planning_plots_multiagent_meta_evaluation_COM_Dyn_H*",
+    ]
+    for pattern in patterns:
+        matches = sorted(raw_root.glob(pattern))
+        if matches:
+            return matches[0]
+    raise FileNotFoundError(
+        f"No COM_Dyn_H scenario directories found under {raw_root} "
+        f"(checked: {patterns})"
+    )
 
 
 def resolve_scenario_dir(
@@ -82,55 +95,101 @@ def resolve_scenario_dir(
         if not scenario_dir.is_absolute():
             scenario_dir = repo_root / scenario_dir
         return scenario_dir
-    config_path = config_path or DEFAULT_CONFIG_PATH
-    config = _read_config(config_path)
+
+    config = read_config(config_path or CONFIG_PATH)
     config_base = config.get("base_dir")
     if config_base:
         scenario_dir = Path(config_base)
         if not scenario_dir.is_absolute():
             scenario_dir = repo_root / scenario_dir
         return scenario_dir
+
     return resolve_default_scenario_dir(repo_root)
 
 
 class DataLoader:
     """
-    Load planned trajectory data for the new COM_Dyn_H evaluation.
-    - 3 drones, 20 Hz (dt = 0.05 s), 6 s horizon.
-    - cable_omega_dot is stored inside xq_traj (indices 6:9).
-    - Control inputs and feedback gains are provided as zeros for compatibility.
+    Load planned trajectory data for COM_Dyn_H evaluation.
     """
 
-    def __init__(self, base_dir: Optional[Path] = None):
-        self.num_drones = 3
-        self.dt = 0.05  # 20 Hz
-        self.traj_duration = 6.0
-        self.train_idx = -1
-        self.task_idx = 0
-        self.rl = 0.25
-        self.alpha = 2 * math.pi / self.num_drones
+    @staticmethod
+    def _extract_suffix(file_path: Path, prefix: str) -> str:
+        name = file_path.name
+        prefix_with_sep = f"{prefix}_"
+        if name.startswith(prefix_with_sep):
+            return name[len(prefix_with_sep):]
+        return name
+
+    def _find_traj_file(
+        self,
+        prefix: str,
+        num_drones: Optional[int],
+        suffix_hint: Optional[str] = None,
+    ) -> Path:
+        if suffix_hint:
+            suffix_clean = suffix_hint
+            if suffix_clean.startswith(f"{prefix}_"):
+                suffix_clean = suffix_clean[len(prefix) + 1 :]
+            suffix_clean = suffix_clean.lstrip("_")
+            if not suffix_clean.endswith(".npy"):
+                suffix_clean = f"{suffix_clean}.npy"
+            candidate = self.path / f"{prefix}_{suffix_clean}"
+            if candidate.exists():
+                return candidate
+
+        patterns = []
+        if num_drones is not None:
+            patterns.append(f"{prefix}_*_a_{num_drones}.npy")
+            patterns.append(f"{prefix}_*_{num_drones}.npy")
+        patterns.append(f"{prefix}_*_a_*.npy")
+        patterns.append(f"{prefix}_*.npy")
+
+        for pattern in patterns:
+            matches = sorted(self.path.glob(pattern))
+            if matches:
+                return matches[0]
+
+        hint = suffix_hint or f"* (num_drones={num_drones or 'any'})"
+        raise FileNotFoundError(f"No {prefix} file matching {hint} in {self.path}")
+
+    def __init__(self, scenario_dir: Optional[Path] = None):
+        if scenario_dir is None:
+            scenario_dir = resolve_scenario_dir(None, config_path=CONFIG_PATH, repo_root=BASE_DIR)
+        scenario_dir = Path(scenario_dir)
+        if not scenario_dir.is_absolute():
+            scenario_dir = BASE_DIR / scenario_dir
+        if not scenario_dir.exists():
+            raise FileNotFoundError(f"Scenario directory not found: {scenario_dir}")
+        self.path = scenario_dir
+
+        # Defaults aligned with COM_Dyn_H config.
+        self.dt = 0.05
+        self.rl = 0.175
         self.cable_length = 1.0
         self.g = 9.81
-        self.ml = 0.45  # m1 + m2
         self.ez = np.array([0.0, 0.0, 1.0]).reshape(3, 1)
-        self.rg = np.zeros(3)
+        self.payload_attitude_identity = False
+        self.rg = np.zeros(3, dtype=float)
 
-        # Paths
-        self.path = resolve_scenario_dir(base_dir, repo_root=BASE_DIR)
-        if not self.path.exists():
-            raise FileNotFoundError(f"Scenario directory not found: {self.path}")
-        reference_dir = self.path / "Reference_traj_6_S_shape_evaluation"
+        config = read_config(CONFIG_PATH)
+        self.num_drones_config = _parse_int(config, "num_drones")
+        self.traj_suffix = None
 
-        config = _read_config(DEFAULT_CONFIG_PATH)
         dt_val = _parse_float(config, "dt")
         if dt_val is not None:
             self.dt = dt_val
+
+        cl0_val = _parse_float(config, "cl0")
+        if cl0_val is not None:
+            self.cable_length = cl0_val
+
+        payload_radius_val = _parse_float(config, "payload_radius")
         rl_val = _parse_float(config, "rl")
-        if rl_val is not None:
+        if payload_radius_val is not None:
+            self.rl = payload_radius_val
+        elif rl_val is not None:
             self.rl = rl_val
-        cl_val = _parse_float(config, "cl0")
-        if cl_val is not None:
-            self.cable_length = cl_val
+
         m1 = _parse_float(config, "m1")
         m2 = _parse_float(config, "m2")
         rp = _parse_vec3(config, "rp")
@@ -139,208 +198,69 @@ class DataLoader:
                 "Missing CoM parameters in preprocess_traj_new.yaml. "
                 "Please set m1, m2, and rp: [x, y, z]."
             )
-        self.ml = m1 + m2
-        if self.ml <= 1e-9:
+        total_mass = m1 + m2
+        if total_mass <= 1e-9:
             raise ValueError(f"Invalid masses: m1 + m2 must be > 0 (got m1={m1}, m2={m2})")
-        self.rg = (m2 / self.ml) * rp
+        self.rg = (m2 / total_mass) * rp
 
-        # Reference trajectory coefficients (S-shape, 4 segments)
-        self.Coeffx = np.zeros((4, 8))
-        self.Coeffy = np.zeros((4, 8))
-        self.Coeffz = np.zeros((4, 8))
-        for k in range(4):
-            self.Coeffx[k, :] = np.load(reference_dir / f"coeffx{k+1}.npy")
-            self.Coeffy[k, :] = np.load(reference_dir / f"coeffy{k+1}.npy")
-            self.Coeffz[k, :] = np.load(reference_dir / f"coeffz{k+1}.npy")
+        xq_file = self._find_traj_file("xq_traj", self.num_drones_config, config.get("traj_suffix"))
+        self.traj_suffix = self._extract_suffix(xq_file, "xq_traj")
+        self.xq_traj = np.load(xq_file, allow_pickle=True)
+        if self.xq_traj.ndim != 3 or self.xq_traj.shape[2] < 9:
+            raise ValueError(f"Unexpected xq_traj shape: {self.xq_traj.shape}")
 
-        # Payload trajectory (shape: [121, 13])
-        xl_file = self.path / "xl_traj_0_3_a_3.npy"
+        self.num_drones = self.xq_traj.shape[0]
+        if self.num_drones_config is not None and self.num_drones_config != self.num_drones:
+            raise ValueError(
+                f"Configured num_drones={self.num_drones_config} but data has {self.num_drones} drones "
+                f"({xq_file.name})"
+            )
+        self.alpha = 2 * math.pi / self.num_drones
+
+        self.cable_direction = self.xq_traj[:, :, 0:3]
+        self.cable_omega = self.xq_traj[:, :, 3:6]
+        self.cable_omega_dot = self.xq_traj[:, :, 6:9]
+        self.cable_mu = self.xq_traj[:, :, 12] if self.xq_traj.shape[2] > 12 else np.zeros(self.xq_traj.shape[:2])
+        self.cable_mu_dot = (
+            self.xq_traj[:, :, 13] if self.xq_traj.shape[2] > 13 else np.zeros(self.xq_traj.shape[:2])
+        )
+
+        xl_file = self._find_traj_file("xl_traj", self.num_drones, self.traj_suffix)
         self.xl_traj = np.load(xl_file, allow_pickle=True)
+        if self.xl_traj.ndim != 2 or self.xl_traj.shape[1] < 13:
+            raise ValueError(f"Unexpected xl_traj shape: {self.xl_traj.shape}")
         self.payload_x = self.xl_traj[:, 0:3]
         self.payload_v = self.xl_traj[:, 3:6]
         self.payload_q = self.xl_traj[:, 6:10]
         self.payload_w = self.xl_traj[:, 10:13]
 
-        # Cable states (shape: [3, 121, 14])
-        self.xq_traj = np.load(self.path / "xq_traj_0_3_a_3.npy", allow_pickle=True)
-        self.cable_direction = self.xq_traj[:, :, 0:3]
-        self.cable_omega = self.xq_traj[:, :, 3:6]
-        self.cable_omega_dot = self.xq_traj[:, :, 6:9]  # now part of the state
-        self.cable_mu = self.xq_traj[:, :, 12]
-        self.cable_mu_dot = self.xq_traj[:, :, 13]
+        self.kfb_path = self._find_traj_file("Kfb_traj", self.num_drones, self.traj_suffix)
+        kfb_raw = np.load(self.kfb_path, allow_pickle=True)
+        if kfb_raw.ndim != 3 or kfb_raw.shape[1:] != (6, 13):
+            raise ValueError(f"Unexpected Kfb shape: {kfb_raw.shape}")
+        self.Kb = kfb_raw
 
-        # Legacy placeholders (zeros) for compatibility with previous code paths
-        N = self.xq_traj.shape[1]
-        self.uq_traj = np.zeros((self.num_drones, N, 3))
-        self.Kb = np.zeros((N, 6, 13))
+        # Compatibility placeholders with legacy code paths.
+        self.uq_traj = np.zeros((self.num_drones, self.xq_traj.shape[1], 3))
 
-        # CasADi symbols for reference generation
-        self.polyc = SX.sym("c", 1, 8)
-        self.time = SX.sym("t")
-        self.time0 = SX.sym("t0")
-        self.pl = SX.sym("pl", 3, 1)
-        self.vl = SX.sym("vl", 3, 1)
-        self.ql = SX.sym("ql", 4, 1)
-        self.wl = SX.sym("wl", 3, 1)
-        self.xl = vertcat(self.pl, self.vl, self.ql, self.wl)
-        self.nxl = self.xl.numel()
-        self.Fl = SX.sym("Fl", 3, 1)
-        self.Ml = SX.sym("Ml", 3, 1)
-        self.Wl = vertcat(self.Fl, self.Ml)
-        self.nWl = self.Wl.numel()
-
-    def get_drone_pos(self):
+    def get_drone_pos(self) -> np.ndarray:
         """
-        Compute initial drone positions using the first payload pose and cable directions.
+        Compute initial drone positions in ENU using first payload sample.
         """
-        drone_pos = np.zeros((self.num_drones, 3))
-        for i in range(self.num_drones):
-            ri = np.array(
-                [
-                    self.rl * math.cos(i * self.alpha),
-                    self.rl * math.sin(i * self.alpha),
-                    0.0,
-                ]
-            )
-            Rl = np.eye(3)
-            drone_pos[i, :] = (
-                self.payload_x[0]
-                + Rl @ ri
-                + self.cable_length * self.cable_direction[i, 0, :].reshape(3, 1).T
-            )
-        return drone_pos
-
-    # Polynomial trajectory helpers
-    def polytraj(self, coeff, time, time0):
-        time_vec = vertcat(
-            1,
-            self.time - self.time0,
-            (self.time - self.time0) ** 2,
-            (self.time - self.time0) ** 3,
-            (self.time - self.time0) ** 4,
-            (self.time - self.time0) ** 5,
-            (self.time - self.time0) ** 6,
-            (self.time - self.time0) ** 7,
+        ri = np.array(
+            [
+                [self.rl * math.cos(i * self.alpha), self.rl * math.sin(i * self.alpha), 0.0]
+                for i in range(self.num_drones)
+            ],
+            dtype=float,
         )
-        polyp = mtimes(self.polyc, time_vec)
-        polyp_fn = Function(
-            "ref_p",
-            [self.polyc, self.time, self.time0],
-            [polyp],
-            ["pc0", "t0", "ti0"],
-            ["ref_pf"],
-        )
-        ref_p = polyp_fn(pc0=coeff, t0=time, ti0=time0)["ref_pf"].full()
-        polyv = jacobian(polyp, self.time)
-        polyv_fn = Function(
-            "ref_v",
-            [self.polyc, self.time, self.time0],
-            [polyv],
-            ["pc0", "t0", "ti0"],
-            ["ref_vf"],
-        )
-        ref_v = polyv_fn(pc0=coeff, t0=time, ti0=time0)["ref_vf"].full()
-        polya = jacobian(polyv, self.time)
-        polya_fn = Function(
-            "ref_a",
-            [self.polyc, self.time, self.time0],
-            [polya],
-            ["pc0", "t0", "ti0"],
-            ["ref_af"],
-        )
-        ref_a = polya_fn(pc0=coeff, t0=time, ti0=time0)["ref_af"].full()
-        polyj = jacobian(polya, self.time)
-        polyj_fn = Function(
-            "ref_j",
-            [self.polyc, self.time, self.time0],
-            [polyj],
-            ["pc0", "t0", "ti0"],
-            ["ref_jf"],
-        )
-        ref_j = polyj_fn(pc0=coeff, t0=time, ti0=time0)["ref_jf"].full()
-        polys = jacobian(polyj, self.time)
-        polys_fn = Function(
-            "ref_s",
-            [self.polyc, self.time, self.time0],
-            [polys],
-            ["pc0", "t0", "ti0"],
-            ["ref_sf"],
-        )
-        ref_s = polys_fn(pc0=coeff, t0=time, ti0=time0)["ref_sf"].full()
-        return ref_p, ref_v, ref_a, ref_j, ref_s
-
-    def minisnap_load_S_shape(self, Coeffx, Coeffy, Coeffz, time, rg):
-        """
-        Reference generator mirrored from Dynamics_meta_learning_COM_Dyn.minisnap_load_S_shape.
-        """
-        t_switch = 0
-        t1 = 2
-        t2 = 1
-        t3 = 1
-        if time < t1:
-            ref_px, ref_vx, ref_ax, ref_jx, ref_sx = self.polytraj(
-                Coeffx[0, :], time, t_switch
-            )
-            ref_py, ref_vy, ref_ay, ref_jy, ref_sy = self.polytraj(
-                Coeffy[0, :], time, t_switch
-            )
-            ref_pz, ref_vz, ref_az, ref_jz, ref_sz = self.polytraj(
-                Coeffz[0, :], time, t_switch
-            )
-        elif time < (t1 + t2):
-            ref_px, ref_vx, ref_ax, ref_jx, ref_sx = self.polytraj(
-                Coeffx[1, :], time, t1 + t_switch
-            )
-            ref_py, ref_vy, ref_ay, ref_jy, ref_sy = self.polytraj(
-                Coeffy[1, :], time, t1 + t_switch
-            )
-            ref_pz, ref_vz, ref_az, ref_jz, ref_sz = self.polytraj(
-                Coeffz[1, :], time, t1 + t_switch
-            )
-        elif time < (t1 + t2 + t3):
-            ref_px, ref_vx, ref_ax, ref_jx, ref_sx = self.polytraj(
-                Coeffx[2, :], time, t1 + t2 + t_switch
-            )
-            ref_py, ref_vy, ref_ay, ref_jy, ref_sy = self.polytraj(
-                Coeffy[2, :], time, t1 + t2 + t_switch
-            )
-            ref_pz, ref_vz, ref_az, ref_jz, ref_sz = self.polytraj(
-                Coeffz[2, :], time, t1 + t2 + t_switch
-            )
-        else:
-            ref_px, ref_vx, ref_ax, ref_jx, ref_sx = self.polytraj(
-                Coeffx[3, :], time, t1 + t2 + t3 + t_switch
-            )
-            ref_py, ref_vy, ref_ay, ref_jy, ref_sy = self.polytraj(
-                Coeffy[3, :], time, t1 + t2 + t3 + t_switch
-            )
-            ref_pz, ref_vz, ref_az, ref_jz, ref_sz = self.polytraj(
-                Coeffz[3, :], time, t1 + t2 + t3 + t_switch
-            )
-
-        ref_p = (
-            np.reshape(np.vstack((ref_px, ref_py, ref_pz)), (3, 1))
-            + np.reshape(np.vstack((rg[0], rg[1], 0)), (3, 1))
-        )
-        ref_v = np.reshape(np.vstack((ref_vx, ref_vy, ref_vz)), (3, 1))
-        ref_q = np.array([[1, 0, 0, 0]]).T
-        ref_w = np.zeros((3, 1))
-        ref_xl = np.reshape(np.vstack((ref_p, ref_v, ref_q, ref_w)), self.nxl)
-        ref_a = np.reshape(np.vstack((ref_ax, ref_ay, ref_az)), (3, 1))
-        ref_Fl = self.ml * (ref_a + self.g * self.ez)
-        ref_ml = np.zeros((3, 1))
-        ref_Wl = np.reshape(np.vstack((ref_Fl, ref_ml)), self.nWl)
-        return ref_xl, ref_Wl
-
-
-def main():
-    loader = DataLoader()
-    print("Payload trajectory:", loader.payload_x.shape)
-    print("Cable direction:", loader.cable_direction.shape)
-    print("Cable omega dot sample:", loader.cable_omega_dot[:, 0, :])
-    print("Kb shape (zeros):", loader.Kb.shape)
-    print("Initial drone positions:\n", loader.get_drone_pos())
+        ri = ri - self.rg[None, :]
+        return self.payload_x[0][None, :] + ri + self.cable_length * self.cable_direction[:, 0, :]
 
 
 if __name__ == "__main__":
-    main()
+    loader = DataLoader()
+    print("Scenario:", loader.path)
+    print("Payload trajectory:", loader.payload_x.shape)
+    print("Cable direction:", loader.cable_direction.shape)
+    print("Kb shape:", loader.Kb.shape)
