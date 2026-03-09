@@ -17,13 +17,17 @@
     payload_radius: 0.245
     cable_length: 1.0
     feedforward_weight: 1.0
-    feedback_weight: 0.0
-    alpha_gain: 0.0
+    feedback_weight: 1.0
+    alpha_gain: 1.0
     yaw_setpoint: 3.141592653589793
     payload_is_enu: true
-    delta_p_max: 0.05
+    delta_p_max: 0.03
     j_max: 30.0
     omega: 5.0
+    delta_mu_max: 0.2
+    delta_mu_j_max: 1000000.0
+    delta_mu_omega: 5.0
+    delta_mu_acc_enable: 1.0
     enable_log: false
     log_path: "/home/radxa/realflight_ws/realflight_log"
     enable_debug_log: false

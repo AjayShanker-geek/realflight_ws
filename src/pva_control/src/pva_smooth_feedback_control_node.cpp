@@ -311,6 +311,58 @@ private:
   Eigen::Vector3d acc_;
 };
 
+struct ThirdOrderFilter3d {
+  Eigen::Vector3d x{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d v{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d a{Eigen::Vector3d::Zero()};
+
+  static Eigen::Vector3d project_to_ball(const Eigen::Vector3d &u, double bound)
+  {
+    const double b = std::abs(bound);
+    if (b <= 0.0) {
+      return u;
+    }
+    const double norm = u.norm();
+    if (norm <= b || norm <= 1e-9) {
+      return u;
+    }
+    return (b / norm) * u;
+  }
+
+  Eigen::Vector3d step(const Eigen::Vector3d &target_raw,
+                       double dt,
+                       double target_bound,
+                       double jerk_bound,
+                       double omega)
+  {
+    dt = std::max(1e-6, dt);
+
+    const Eigen::Vector3d target = project_to_ball(target_raw, target_bound);
+    const double k_a = 3.0 * omega;
+    const double k_v = 3.0 * omega * omega;
+    const double k_p = omega * omega * omega;
+
+    const Eigen::Vector3d e = target - x;
+    const Eigen::Vector3d j_des = k_p * e - k_v * v - k_a * a;
+    const Eigen::Vector3d j = project_to_ball(j_des, jerk_bound);
+
+    Eigen::Vector3d a_next = a + dt * j;
+    Eigen::Vector3d v_next = v + dt * a_next;
+    Eigen::Vector3d x_pred = x + dt * v_next;
+    Eigen::Vector3d x_next = project_to_ball(x_pred, target_bound);
+
+    if ((x_next - x_pred).norm() > 1e-9) {
+      v_next = (x_next - x) / dt;
+      a_next = (v_next - v) / dt;
+    }
+
+    x = x_next;
+    v = v_next;
+    a = a_next;
+    return target;
+  }
+};
+
 class PvaSmoothFeedbackControlNode : public rclcpp::Node
 {
 public:
@@ -362,8 +414,6 @@ private:
   Eigen::Matrix3d hat(const Eigen::Vector3d &v) const;
   std::string get_px4_namespace(int drone_id);
   bool all_drones_in_traj_state() const;
-
-  Eigen::Vector3d sat_vec(const Eigen::Vector3d &v, double bound) const;
 
   // Publishers
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr traj_pub_;
@@ -459,9 +509,12 @@ private:
   double delta_p_max_;
   double j_max_;
   double omega_;
-  Eigen::Vector3d delta_p_sm_;
-  Eigen::Vector3d delta_v_sm_;
-  Eigen::Vector3d delta_a_sm_;
+  ThirdOrderFilter3d delta_p_filter_;
+  double delta_mu_max_;
+  double delta_mu_j_max_;
+  double delta_mu_omega_;
+  double delta_mu_acc_enable_;
+  ThirdOrderFilter3d delta_mu_filter_;
 
   double last_delta_time_;
 
@@ -514,9 +567,10 @@ PvaSmoothFeedbackControlNode::PvaSmoothFeedbackControlNode(int drone_id, int tot
 , delta_p_max_(0.05)
 , j_max_(5.0)
 , omega_(2.0)
-, delta_p_sm_(Eigen::Vector3d::Zero())
-, delta_v_sm_(Eigen::Vector3d::Zero())
-, delta_a_sm_(Eigen::Vector3d::Zero())
+, delta_mu_max_(0.0)
+, delta_mu_j_max_(1e6)
+, delta_mu_omega_(2.0)
+, delta_mu_acc_enable_(0.0)
 , last_delta_time_(0.0)
 , log_enabled_(false)
 , debug_log_enabled_(false)
@@ -558,6 +612,10 @@ PvaSmoothFeedbackControlNode::PvaSmoothFeedbackControlNode(int drone_id, int tot
   delta_p_max_ = this->declare_parameter("delta_p_max", 0.05);
   j_max_ = this->declare_parameter("j_max", 5.0);
   omega_ = this->declare_parameter("omega", 2.0);
+  delta_mu_max_ = this->declare_parameter("delta_mu_max", 0.0);
+  delta_mu_j_max_ = this->declare_parameter("delta_mu_j_max", 1e6);
+  delta_mu_omega_ = this->declare_parameter("delta_mu_omega", 2.0);
+  delta_mu_acc_enable_ = this->declare_parameter("delta_mu_acc_enable", 0.0);
 
   std::string mode = this->declare_parameter("mode", std::string("sitl"));
   if (!this->has_parameter("use_sim_time")) {
@@ -837,23 +895,6 @@ Eigen::Matrix3d PvaSmoothFeedbackControlNode::hat(const Eigen::Vector3d &v) cons
        v.z(), 0, -v.x(),
       -v.y(), v.x(), 0;
   return m;
-}
-
-Eigen::Vector3d PvaSmoothFeedbackControlNode::sat_vec(const Eigen::Vector3d &v, double bound) const
-{
-  Eigen::Vector3d out = v;
-  for (int i = 0; i < 3; ++i) {
-    double b = std::abs(bound);
-    if (b <= 0.0) {
-      continue;
-    }
-    if (out[i] > b) {
-      out[i] = b;
-    } else if (out[i] < -b) {
-      out[i] = -b;
-    }
-  }
-  return out;
 }
 
 void PvaSmoothFeedbackControlNode::build_allocation_matrix()
@@ -1476,6 +1517,7 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
   Eigen::Vector3d mu_fb_enu = Eigen::Vector3d::Zero();
   if (P_pinv_.cols() == 6 && payload_ready_) {
     Eigen::Quaterniond q_meas_enu = payload_q_enu_;
+    Eigen::Matrix3d R_meas_enu = q_meas_enu.toRotationMatrix();
     Eigen::Quaterniond q_des_enu = payload_des.q.normalized();
     if (q_des_enu.w() < 0.0) {
       q_des_enu.coeffs() *= -1.0;
@@ -1493,14 +1535,24 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
 
     Eigen::Matrix<double, 13, 1> e_ddp;
     e_ddp << e_x_enu, e_v_enu, e_q_enu, e_omega_enu;
-    Eigen::Matrix<double, 6, 1> FM_enu = alpha_gain_ * kfb.K * e_ddp;
+    Eigen::Matrix<double, 6, 1> FM_mixed = alpha_gain_ * kfb.K * e_ddp;
 
-    Eigen::VectorXd delta_mu = P_pinv_ * FM_enu;
+    // The feedback gain outputs force in world ENU and moment in payload body.
+    // Convert force into the payload body frame before using the constant body-frame
+    // allocation matrix P = [I; hat(rho_i)].
+    Eigen::Matrix<double, 6, 1> FM_body;
+    FM_body.segment<3>(0) = R_meas_enu.transpose() * FM_mixed.segment<3>(0);
+    FM_body.segment<3>(3) = FM_mixed.segment<3>(3);
+
+    Eigen::VectorXd delta_mu = P_pinv_ * FM_body;
     if (static_cast<int>(delta_mu.size()) >= 3 * (drone_id_ + 1)) {
-      Eigen::Vector3d delta_mu_i = delta_mu.segment<3>(3 * drone_id_);
-      mu_fb_enu = delta_mu_i;
+      Eigen::Vector3d delta_mu_i_body = delta_mu.segment<3>(3 * drone_id_);
+      mu_fb_enu = feedback_weight_ * (R_meas_enu * delta_mu_i_body);
     }
   }
+
+  static_cast<void>(
+    delta_mu_filter_.step(mu_fb_enu, dt, delta_mu_max_, delta_mu_j_max_, delta_mu_omega_));
 
   Eigen::Vector3d mu_new_enu = mu_plan_enu + mu_fb_enu;
 
@@ -1521,49 +1573,22 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
 
   Eigen::Vector3d planned_pos(traj.x, traj.y, traj.z);
   Eigen::Vector3d delta_p = new_pos_ned - planned_pos;
-  Eigen::Vector3d delta_p_in = sat_vec(delta_p, delta_p_max_);
+  Eigen::Vector3d delta_p_raw =
+    delta_p_filter_.step(delta_p, dt, delta_p_max_, j_max_, omega_);
 
-  // Jerk-limited tracking filter
-  double k_a = 3.0 * omega_;
-  double k_v = 3.0 * omega_ * omega_;
-  double k_p = omega_ * omega_ * omega_;
-  Eigen::Vector3d e = delta_p_in - delta_p_sm_;
-  Eigen::Vector3d delta_j_des = k_p * e - k_v * delta_v_sm_ - k_a * delta_a_sm_;
-  Eigen::Vector3d delta_j = sat_vec(delta_j_des, j_max_);
-
-  Eigen::Vector3d delta_a = delta_a_sm_ + dt * delta_j;
-  Eigen::Vector3d delta_v = delta_v_sm_ + dt * delta_a;
-  Eigen::Vector3d delta_p_pred = delta_p_sm_ + dt * delta_v;
-  Eigen::Vector3d delta_p_sm = sat_vec(delta_p_pred, delta_p_max_);
-  if ((delta_p_sm - delta_p_pred).norm() > 1e-9) {
-    delta_v = (delta_p_sm - delta_p_sm_) / dt;
-  }
-  delta_a = (delta_v - delta_v_sm_) / dt;
-  delta_j = sat_vec((delta_a - delta_a_sm_) / dt, j_max_);
-  delta_a = delta_a_sm_ + dt * delta_j;
-  delta_v = delta_v_sm_ + dt * delta_a;
-  delta_p_sm = delta_p_sm_ + dt * delta_v;
-  delta_p_sm = sat_vec(delta_p_sm, delta_p_max_);
-  delta_v = (delta_p_sm - delta_p_sm_) / dt;
-  delta_a = (delta_v - delta_v_sm_) / dt;
-  delta_j = sat_vec((delta_a - delta_a_sm_) / dt, j_max_);
-
-  Eigen::Vector3d delta_p_raw = delta_p_in;
-  delta_p_sm_ = delta_p_sm;
-  delta_v_sm_ = delta_v;
-  delta_a_sm_ = delta_a;
-
-  Eigen::Vector3d pos_sp = planned_pos + delta_p_sm_;
+  Eigen::Vector3d pos_sp = planned_pos + delta_p_filter_.x;
   Eigen::Vector3d vel_sp(traj.vx, traj.vy, traj.vz);
-  vel_sp += delta_v_sm_;
+  vel_sp += delta_p_filter_.v;
   Eigen::Vector3d acc_sp(traj.ax, traj.ay, traj.az);
-  acc_sp += delta_a_sm_;
+  acc_sp += delta_p_filter_.a;
 
   Eigen::Vector3d mu_ff_ned = T_enu2ned_ * mu_plan_enu;
   Eigen::Vector3d mu_fb_ned = T_enu2ned_ * mu_fb_enu;
+  Eigen::Vector3d delta_mu_sm_ned = T_enu2ned_ * delta_mu_filter_.x;
   if (drone_mass_ > 1e-6) {
     Eigen::Vector3d aff = mu_ff_ned / drone_mass_;
     acc_sp += aff;
+    acc_sp += delta_mu_acc_enable_ * (delta_mu_sm_ned / drone_mass_);
   }
 
   px4_msgs::msg::TrajectorySetpoint msg;
@@ -1586,7 +1611,7 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
   double now_s = use_payload_stamp_time_ ? sim_time_ : this->now().seconds();
   log_sample(now_s, traj, payload_des, acc_sp, mu_ff_ned, mu_fb_ned,
              payload_pos_enu, payload_vel_enu, e_x_enu, e_v_enu,
-             delta_p_raw, delta_p_sm_);
+             delta_p_raw, delta_p_filter_.x);
 }
 
 void PvaSmoothFeedbackControlNode::log_sample(double now_s,
