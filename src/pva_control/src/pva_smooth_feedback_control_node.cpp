@@ -504,6 +504,7 @@ private:
   double cable_length_;
   bool payload_is_enu_;
   bool use_wall_timer_;
+  bool use_identity_payload_attitude_ref_;
 
   // Jerk-limited tracker params/states
   double delta_p_max_;
@@ -564,6 +565,7 @@ PvaSmoothFeedbackControlNode::PvaSmoothFeedbackControlNode(int drone_id, int tot
 , cable_length_(1.0)
 , payload_is_enu_(true)
 , use_wall_timer_(false)
+, use_identity_payload_attitude_ref_(false)
 , delta_p_max_(0.05)
 , j_max_(5.0)
 , omega_(2.0)
@@ -609,6 +611,8 @@ PvaSmoothFeedbackControlNode::PvaSmoothFeedbackControlNode(int drone_id, int tot
   feedback_weight_ = this->declare_parameter("feedback_weight", 1.0);
   use_wall_timer_ = this->declare_parameter("use_wall_timer", false);
   use_payload_stamp_time_ = this->declare_parameter("use_payload_stamp_time", false);
+  use_identity_payload_attitude_ref_ =
+    this->declare_parameter("use_identity_payload_attitude_ref", false);
   delta_p_max_ = this->declare_parameter("delta_p_max", 0.05);
   j_max_ = this->declare_parameter("j_max", 5.0);
   omega_ = this->declare_parameter("omega", 2.0);
@@ -804,6 +808,8 @@ PvaSmoothFeedbackControlNode::PvaSmoothFeedbackControlNode(int drone_id, int tot
   RCLCPP_INFO(this->get_logger(), "Cable CSV: %s", cable_csv_.c_str());
   RCLCPP_INFO(this->get_logger(), "Payload CSV: %s", payload_csv_.c_str());
   RCLCPP_INFO(this->get_logger(), "Kfb CSV: %s", kfb_csv_.c_str());
+  RCLCPP_INFO(this->get_logger(), "Use identity payload attitude ref: %s",
+              use_identity_payload_attitude_ref_ ? "true" : "false");
 
   if (!load_trajectory_from_csv(trajectory_csv_)) {
     RCLCPP_ERROR(this->get_logger(), "Failed to load trajectory from CSV!");
@@ -1511,14 +1517,24 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
   Eigen::Vector3d payload_pos_enu = payload_pos_meas_enu_;
   Eigen::Vector3d payload_vel_enu = payload_vel_meas_enu_;
   Eigen::Vector3d payload_omega_enu = payload_omega_meas_enu_;
-  Eigen::Vector3d e_x_enu = payload_pos_enu - payload_des.pos;
-  Eigen::Vector3d e_v_enu = payload_vel_enu - payload_des.vel;
+  PayloadPoint payload_ref = payload_des;
+  // The CSV payload position is planned CoM, while mocap measures the payload CoG.
+  // In the real experiments the desired payload attitude is identity in ENU, so the
+  // desired CoG is the planned CoM shifted by rg without any body-to-world rotation.
+  payload_ref.pos -= payload_rg_;
+  if (use_identity_payload_attitude_ref_) {
+    payload_ref.q = Eigen::Quaterniond::Identity();
+    payload_ref.omega.setZero();
+  }
+
+  Eigen::Vector3d e_x_enu = payload_pos_enu - payload_ref.pos;
+  Eigen::Vector3d e_v_enu = payload_vel_enu - payload_ref.vel;
 
   Eigen::Vector3d mu_fb_enu = Eigen::Vector3d::Zero();
   if (P_pinv_.cols() == 6 && payload_ready_) {
     Eigen::Quaterniond q_meas_enu = payload_q_enu_;
     Eigen::Matrix3d R_meas_enu = q_meas_enu.toRotationMatrix();
-    Eigen::Quaterniond q_des_enu = payload_des.q.normalized();
+    Eigen::Quaterniond q_des_enu = payload_ref.q.normalized();
     if (q_des_enu.w() < 0.0) {
       q_des_enu.coeffs() *= -1.0;
     }
@@ -1531,7 +1547,7 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
                             q_meas_enu.y() - q_des_enu.y(),
                             q_meas_enu.z() - q_des_enu.z());
 
-    Eigen::Vector3d e_omega_enu = payload_omega_enu - payload_des.omega;
+    Eigen::Vector3d e_omega_enu = payload_omega_enu - payload_ref.omega;
 
     Eigen::Matrix<double, 13, 1> e_ddp;
     e_ddp << e_x_enu, e_v_enu, e_q_enu, e_omega_enu;
@@ -1562,7 +1578,7 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
     cable_dir_new_enu = mu_new_enu / mu_norm;
   }
 
-  Eigen::Quaterniond q_des_enu = payload_des.q.normalized();
+  Eigen::Quaterniond q_des_enu = payload_ref.q.normalized();
   if (q_des_enu.w() < 0.0) {
     q_des_enu.coeffs() *= -1.0;
   }
@@ -1609,7 +1625,7 @@ void PvaSmoothFeedbackControlNode::publish_trajectory_setpoint(
 
   traj_pub_->publish(msg);
   double now_s = use_payload_stamp_time_ ? sim_time_ : this->now().seconds();
-  log_sample(now_s, traj, payload_des, acc_sp, mu_ff_ned, mu_fb_ned,
+  log_sample(now_s, traj, payload_ref, acc_sp, mu_ff_ned, mu_fb_ned,
              payload_pos_enu, payload_vel_enu, e_x_enu, e_v_enu,
              delta_p_raw, delta_p_filter_.x);
 }
