@@ -2,7 +2,7 @@
 build/
 install/
 log/
-rosbags/
+*rosbags*
 
 # vscode settings
 .vscode/

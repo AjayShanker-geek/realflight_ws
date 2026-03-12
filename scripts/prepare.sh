@@ -24,6 +24,7 @@
 set -e  # Exit on any error
 DRONE_ID="${DRONE_ID:-0}"
 FASTDDS_PROFILE_FILE="${FASTDDS_PROFILE_FILE:-$HOME/fastdds_lo_only.xml}"
+QGC_LOCAL_PORT="${QGC_LOCAL_PORT:-14555}"
 # Keep localhost-only, but don't force ROS_DOMAIN_ID in this script.
 # If needed, set ROS_DOMAIN_ID externally to match PX4 UXRCE_DDS_DOM_ID.
 # QoS-from-XML can crash with this transport-only profile on Humble, keep it off by default.
@@ -84,6 +85,7 @@ echo "DRONE_NAME_VICON: $DRONE_NAME_VICON"
 echo "VICON_IP: $VICON_IP"
 echo "MQ_IP: $MQ_IP"
 echo "DRONE_ID: $DRONE_ID"
+echo "QGC_LOCAL_PORT: $QGC_LOCAL_PORT"
 echo "FASTDDS_PROFILE_FILE: $FASTDDS_PROFILE_FILE"
 echo "RMW_FASTRTPS_USE_QOS_FROM_XML: $RMW_FASTRTPS_USE_QOS_FROM_XML"
 echo "======================================"
@@ -152,15 +154,18 @@ start_screen_session "px4_microdds" "$PX4_MICRODDS_CMD"
 # ============================================================================
 # Module 2: QGroundControl Serial-to-UDP Forwarder
 # ============================================================================
-# Forwards MAVLink messages from PX4 to QGroundControl via UDP
+# Forwards MAVLink messages between PX4 and QGroundControl via UDP
 # - Input: /dev/ttyACM0 (PX4 serial port for telemetry)
 # - Baud Rate: 115200
-# - Output: UDP to GCS_IP:14550 (QGC default port)
+# - Remote: UDP to GCS_IP:14550 (QGC default port)
+# - Local: UDP bind on QGC_LOCAL_PORT for return traffic from QGC
+# A send-only UDP forwarder prevents QGC from sending SYSTEM_TIME to PX4,
+# which can leave ULog timestamps as "Date unknown".
 echo ""
 echo "======================================"
 echo "Starting QGroundControl Forwarder..."
 echo "======================================"
-QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,raw,b115200,echo=0 UDP-SENDTO:$GCS_IP:14550"
+QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,raw,b115200,echo=0 UDP:$GCS_IP:14550,sourceport=$QGC_LOCAL_PORT,reuseaddr"
 start_screen_session "qgc_forward" "$QGC_FORWARD_CMD"
 
 # ============================================================================
