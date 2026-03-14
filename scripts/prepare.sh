@@ -39,9 +39,24 @@ echo "sync with remote time server if ssh connected..."
 echo "======================================"
 
 export TIMESYNC_IP="192.168.1.123"
-if command -v ntpdate >/dev/null 2>&1; then
-    sudo ntpdate -u "$TIMESYNC_IP" && echo "time already sync with $TIMESYNC_IP."
-fi
+
+sync_time() {
+    if ! command -v ntpdate >/dev/null 2>&1; then
+        echo "WARNING: ntpdate not found; skipping time sync."
+        return 0
+    fi
+
+    echo "Waiting for time sync with $TIMESYNC_IP..."
+    if sudo ntpdate -u "$TIMESYNC_IP"; then
+        echo "Time sync completed with $TIMESYNC_IP."
+        return 0
+    fi
+
+    echo "WARNING: time sync with $TIMESYNC_IP failed. Continuing startup."
+    return 0
+}
+
+sync_time
 
 # if [[ -n "$SSH_CONNECTION" ]]; then
 #     REMOTE_IP=$(echo $SSH_CONNECTION | awk '{print $1}')
@@ -159,13 +174,15 @@ start_screen_session "px4_microdds" "$PX4_MICRODDS_CMD"
 # - Baud Rate: 115200
 # - Remote: UDP to GCS_IP:14550 (QGC default port)
 # - Local: UDP bind on QGC_LOCAL_PORT for return traffic from QGC
-# A send-only UDP forwarder prevents QGC from sending SYSTEM_TIME to PX4,
-# which can leave ULog timestamps as "Date unknown".
+# Use UDP-DATAGRAM rather than UDP/udp-connect so incoming MAVLink is not tied
+# to a single peer port. QGC may send replies from a different source port,
+# which otherwise makes SYSTEM_TIME delivery intermittent and leaves some ULogs
+# with "Date unknown" or an incorrect wall-clock timestamp.
 echo ""
 echo "======================================"
 echo "Starting QGroundControl Forwarder..."
 echo "======================================"
-QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,raw,b115200,echo=0 UDP:$GCS_IP:14550,sourceport=$QGC_LOCAL_PORT,reuseaddr"
+QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,rawer,b115200,echo=0 UDP-DATAGRAM:$GCS_IP:14550,sourceport=$QGC_LOCAL_PORT,reuseaddr,udp-ignore-peerport"
 start_screen_session "qgc_forward" "$QGC_FORWARD_CMD"
 
 # ============================================================================
@@ -210,23 +227,23 @@ ZMQ_BRIDGE_CMD="ros2 run zmq_state_bridge zmq_state_bridge_node --ros-args \
   -p cmd_sub_endpoint:=tcp://$MQ_IP:5560"
 start_screen_session "zmq_bridge" "$ZMQ_BRIDGE_CMD"
 
-# ============================================================================
-# PX4 Topic Visibility Check
-# ============================================================================
-echo ""
-echo "======================================"
-echo "Checking PX4 DDS topic visibility..."
-echo "======================================"
-PX4_TOPIC_COUNT=$(
-    bash -lc "$ROS2_SETUP_CMD && ros2 topic list --no-daemon --spin-time 8 2>/dev/null \
-        | grep -E '^/fmu/(in|out)/' | wc -l" || echo 0
-)
-PX4_TOPIC_COUNT=$(echo "$PX4_TOPIC_COUNT" | tr -d '[:space:]')
-echo "PX4 topic count (/fmu/in|/fmu/out): $PX4_TOPIC_COUNT"
-if [ -z "$PX4_TOPIC_COUNT" ] || [ "$PX4_TOPIC_COUNT" -lt 5 ]; then
-    echo "WARNING: PX4 topics are not visible under ROS_LOCALHOST_ONLY=1."
-    echo "Set PX4 parameter UXRCE_DDS_PTCFG=1 (localhost-only) and reboot PX4."
-fi
+# # ============================================================================
+# # PX4 Topic Visibility Check
+# # ============================================================================
+# echo ""
+# echo "======================================"
+# echo "Checking PX4 DDS topic visibility..."
+# echo "======================================"
+# PX4_TOPIC_COUNT=$(
+#     bash -lc "$ROS2_SETUP_CMD && ros2 topic list --no-daemon --spin-time 8 2>/dev/null \
+#         | grep -E '^/fmu/(in|out)/' | wc -l" || echo 0
+# )
+# PX4_TOPIC_COUNT=$(echo "$PX4_TOPIC_COUNT" | tr -d '[:space:]')
+# echo "PX4 topic count (/fmu/in|/fmu/out): $PX4_TOPIC_COUNT"
+# if [ -z "$PX4_TOPIC_COUNT" ] || [ "$PX4_TOPIC_COUNT" -lt 5 ]; then
+#     echo "WARNING: PX4 topics are not visible under ROS_LOCALHOST_ONLY=1."
+#     echo "Set PX4 parameter UXRCE_DDS_PTCFG=1 (localhost-only) and reboot PX4."
+# fi
 
 # ============================================================================
 # Startup Complete
