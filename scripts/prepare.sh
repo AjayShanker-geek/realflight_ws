@@ -24,7 +24,7 @@
 set -e  # Exit on any error
 DRONE_ID="${DRONE_ID:-0}"
 FASTDDS_PROFILE_FILE="${FASTDDS_PROFILE_FILE:-$HOME/fastdds_lo_only.xml}"
-QGC_LOCAL_PORT="${QGC_LOCAL_PORT:-14555}"
+QGC_LOCAL_PORT="${QGC_LOCAL_PORT:-$((14550 + DRONE_ID))}"
 # Keep localhost-only, but don't force ROS_DOMAIN_ID in this script.
 # If needed, set ROS_DOMAIN_ID externally to match PX4 UXRCE_DDS_DOM_ID.
 # QoS-from-XML can crash with this transport-only profile on Humble, keep it off by default.
@@ -182,7 +182,7 @@ echo ""
 echo "======================================"
 echo "Starting QGroundControl Forwarder..."
 echo "======================================"
-QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,rawer,b115200,echo=0 UDP-DATAGRAM:$GCS_IP:14550,sourceport=$QGC_LOCAL_PORT,reuseaddr,udp-ignore-peerport"
+QGC_FORWARD_CMD="socat -d -d /dev/ttyACM0,rawer,b115200,echo=0 UDP-DATAGRAM:$GCS_IP:$QGC_LOCAL_PORT,bind=:$QGC_LOCAL_PORT,reuseaddr"
 start_screen_session "qgc_forward" "$QGC_FORWARD_CMD"
 
 # ============================================================================
