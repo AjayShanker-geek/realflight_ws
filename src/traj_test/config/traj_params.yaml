@@ -3,7 +3,7 @@
 
 /**:
   ros__parameters:
-    circle_radius: 1.5
+    circle_radius: 1.0
     circle_center_x: 0.0
     circle_center_y: 0.0
     circle_center_z: -1.2

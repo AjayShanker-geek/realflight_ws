@@ -31,7 +31,7 @@ def generate_launch_description() -> LaunchDescription:
     
     # In NED frame: x=North, y=East, z=Down
     # Takeoff position: hover at origin with 1.2m altitude
-    goto_x = 1.50   
+    goto_x = 1.0   
     goto_y = 0.0    
     goto_z = -takeoff_altitude  # NED: negative means up
     
