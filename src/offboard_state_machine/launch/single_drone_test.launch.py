@@ -27,6 +27,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     drone_id = LaunchConfiguration('drone_id')
     takeoff_altitude = 1.2  # meters above ground
+    use_attitude_control = False
     
     # In NED frame: x=North, y=East, z=Down
     # Takeoff position: hover at origin with 1.2m altitude
@@ -56,7 +57,8 @@ def generate_launch_description() -> LaunchDescription:
             "alt_tol": 0.01,            # altitude tolerance in meters
             "inward_offset": 0.0,       # no offset for single drone at origin
             "payload_offset_x": 0.0,    # no payload offset
-            "payload_offset_y": 0.00   # match goto_y for hover
+            "payload_offset_y": 0.00,   # match goto_y for hover
+            "use_attitude_control": use_attitude_control
         }],
     )
 

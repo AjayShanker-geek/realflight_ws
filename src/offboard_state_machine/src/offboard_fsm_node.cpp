@@ -165,7 +165,7 @@ OffboardFSM::OffboardFSM(int drone_id)
 , takeoff_start_count_(0)
 , takeoff_complete_count_(-1)
 , landing_start_count_(0)
-, use_attitude_control_(false)         
+, use_attitude_control_(declare_parameter("use_attitude_control", false))
 , odom_ready_(false)
 , vel_initialized_(false)
 , has_final_setpoint_(false)
@@ -290,7 +290,7 @@ void OffboardFSM::state_cmd_cb(const std_msgs::msg::Int32::SharedPtr msg)
 
   if (new_state == FsmState::TRAJ) {
     state_start_time_     = now();
-    use_attitude_control_ = true;
+    use_attitude_control_ = this->get_parameter("use_attitude_control").as_bool();
   }
 
   if (new_state == FsmState::END_TRAJ) {
@@ -765,10 +765,6 @@ void OffboardFSM::timer_cb()
     break;
 
   case FsmState::TRAJ:
-    if (!use_attitude_control_) {
-      use_attitude_control_ = true;
-      state_start_time_ = now();
-    }
     break;
 
   case FsmState::END_TRAJ: {

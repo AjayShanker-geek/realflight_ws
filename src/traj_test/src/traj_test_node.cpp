@@ -183,6 +183,28 @@ double TrajTestNode::calculate_angular_velocity_at_time(double t)
   return current_omega;
 }
 
+double TrajTestNode::calculate_angular_acceleration_at_time(double t)
+{
+  double omega_max = max_angular_vel_;
+  double alpha_up = angular_acceleration_;
+  double alpha_down = omega_max / ramp_down_time_;
+  double t_up = ramp_up_time_;
+  double t_const = total_constant_duration_;
+  double t_down = ramp_down_time_;
+  double t_start_down = t_up + t_const;
+
+  if (t <= t_up) {
+    return alpha_up;
+  }
+  if (t <= t_start_down) {
+    return 0.0;
+  }
+  if (t <= t_start_down + t_down) {
+    return -alpha_down;
+  }
+  return 0.0;
+}
+
 void TrajTestNode::state_callback(const std_msgs::msg::Int32::SharedPtr msg)
 {
   auto state = static_cast<FsmState>(msg->data);
@@ -267,10 +289,11 @@ void TrajTestNode::timer_callback()
 
 void TrajTestNode::generate_circular_trajectory(double t)
 {
-  double x, y, z, vx, vy, vz, yaw;
+  double x, y, z, vx, vy, vz, ax, ay, az, yaw;
   
   // Calculate angular velocity at current time
   double current_omega = calculate_angular_velocity_at_time(t);
+  double current_alpha = calculate_angular_acceleration_at_time(t);
   
   // Calculate angular position
   double theta = calculate_theta_at_time(t);
@@ -286,12 +309,19 @@ void TrajTestNode::generate_circular_trajectory(double t)
   vx = -v_linear * std::sin(theta_with_phase);
   vy =  v_linear * std::cos(theta_with_phase);
   vz = 0.0;
+
+  // Linear acceleration from tangential and centripetal terms.
+  ax = -circle_radius_ * (current_alpha * std::sin(theta_with_phase) +
+                          current_omega * current_omega * std::cos(theta_with_phase));
+  ay =  circle_radius_ * (current_alpha * std::cos(theta_with_phase) -
+                          current_omega * current_omega * std::sin(theta_with_phase));
+  az = 0.0;
   
   // Yaw pointing forward
   yaw = 3.1415926f;
   
   // Publish setpoint
-  publish_trajectory_setpoint(x, y, z, vx, vy, vz, yaw);
+  publish_trajectory_setpoint(x, y, z, vx, vy, vz, ax, ay, az, yaw);
   
   // Debug logging with phase info
   double t_up = ramp_up_time_;
@@ -319,6 +349,7 @@ void TrajTestNode::generate_circular_trajectory(double t)
 void TrajTestNode::publish_trajectory_setpoint(
   double x, double y, double z,
   double vx, double vy, double vz,
+  double ax, double ay, double az,
   double yaw)
 {
   px4_msgs::msg::TrajectorySetpoint msg;
@@ -330,6 +361,10 @@ void TrajTestNode::publish_trajectory_setpoint(
   msg.velocity[0] = static_cast<float>(vx);
   msg.velocity[1] = static_cast<float>(vy);
   msg.velocity[2] = static_cast<float>(vz);
+
+  msg.acceleration[0] = static_cast<float>(ax);
+  msg.acceleration[1] = static_cast<float>(ay);
+  msg.acceleration[2] = static_cast<float>(az);
   
   msg.yaw = static_cast<float>(yaw);
   msg.timestamp = 0;  // Let PX4 assign timestamp

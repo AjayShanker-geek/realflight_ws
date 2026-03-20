@@ -24,13 +24,15 @@ private:
   void generate_circular_trajectory(double t);
   void publish_trajectory_setpoint(double x, double y, double z, 
                                    double vx, double vy, double vz,
+                                   double ax, double ay, double az,
                                    double yaw);
   void send_state_command(int state);
   
   std::string get_px4_namespace(int drone_id);
   double calculate_effective_duration();
   double calculate_theta_at_time(double t);
-  double calculate_angular_velocity_at_time(double t);  
+  double calculate_angular_velocity_at_time(double t);
+  double calculate_angular_acceleration_at_time(double t);
 
   // Circle trajectory parameters
   int drone_id_;
